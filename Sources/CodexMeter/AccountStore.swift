@@ -18,15 +18,22 @@ final class AccountStore: ObservableObject {
     private let fileManager: FileManager
     private let appSupport: URL
     private let liveCodexHome: URL
+    private let restartsCodexDesktopOnSwitch: Bool
     private var refreshTask: Task<Void, Never>?
     private var lastCursorActivityRefresh: Date?
     private var hasStarted = false
     private var configURL: URL { appSupport.appendingPathComponent("accounts.json") }
 
-    init(fileManager: FileManager = .default, appSupport: URL? = nil, liveCodexHome: URL? = nil) {
+    init(
+        fileManager: FileManager = .default,
+        appSupport: URL? = nil,
+        liveCodexHome: URL? = nil,
+        restartsCodexDesktopOnSwitch: Bool = true
+    ) {
         self.fileManager = fileManager
         self.appSupport = appSupport ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("CodexMeter", isDirectory: true)
         self.liveCodexHome = liveCodexHome ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        self.restartsCodexDesktopOnSwitch = restartsCodexDesktopOnSwitch
         self.customCodexPath = UserDefaults.standard.string(forKey: "customCodexPath") ?? ""
         load()
     }
@@ -141,6 +148,7 @@ final class AccountStore: ObservableObject {
             try atomicCopy(from: selectedAuth, to: liveAuth)
             activeID = profile.id
             save()
+            if restartsCodexDesktopOnSwitch { restartCodexDesktop() }
         } catch {
             alertMessage = error.localizedDescription
         }
@@ -173,6 +181,31 @@ final class AccountStore: ObservableObject {
             _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
         } else {
             try fileManager.moveItem(at: temporary, to: destination)
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+    }
+
+    private func restartCodexDesktop() {
+        let bundleIdentifier = "com.openai.codex"
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else { return }
+        NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).forEach { $0.terminate() }
+
+        Task { @MainActor in
+            for _ in 0..<20 {
+                if NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty { break }
+                try? await Task.sleep(for: .milliseconds(250))
+            }
+            guard NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty else {
+                alertMessage = "The account was switched, but Codex could not be restarted. Quit and reopen Codex to load it."
+                return
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            do {
+                _ = try await NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
+            } catch {
+                alertMessage = "The account was switched, but Codex could not be reopened: \(error.localizedDescription)"
+            }
         }
     }
 

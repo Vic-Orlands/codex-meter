@@ -3,9 +3,6 @@ import SwiftUI
 
 private enum MeterPalette {
     static let blue = Color(red: 0.31, green: 0.62, blue: 1.0)
-    static let cyan = Color(red: 0.34, green: 0.82, blue: 0.79)
-    static let violet = Color(red: 0.57, green: 0.48, blue: 0.98)
-    static let amber = Color(red: 1.0, green: 0.65, blue: 0.34)
     static let card = Color(nsColor: .controlBackgroundColor).opacity(0.72)
     static let radius: CGFloat = 8
     static let fontSize: CGFloat = 11
@@ -248,13 +245,12 @@ struct MenuContentView: View {
                 .disabled(store.isRefreshing)
                 .help("Add account")
             }
-            .padding(.leading, 8)
         }
         .frame(height: 35)
     }
 
     private func accountPanel(profile: AccountProfile) -> some View {
-        VStack(alignment: .leading, spacing: -1) {
+        VStack(alignment: .leading, spacing: 8) {
             accountStrip.zIndex(2)
             accountHero(profile: profile)
                 .id(profile.id)
@@ -289,7 +285,7 @@ struct MenuContentView: View {
                 }
 
                 QuotaRail(title: "5-hour", window: limits?.primary, tint: MeterPalette.blue)
-                QuotaRail(title: "Weekly", window: limits?.secondary, tint: MeterPalette.violet)
+                QuotaRail(title: "Weekly", window: limits?.secondary, tint: MeterPalette.blue.opacity(0.55))
             }
 
             if store.activeID != profile.id {
@@ -306,18 +302,14 @@ struct MenuContentView: View {
                 .background(MeterPalette.blue, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
             }
         }
-        .padding(14)
         .frame(maxWidth: .infinity)
-        .background(MeterPalette.card, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
-        .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
-        .overlay(RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous).stroke(.white.opacity(0.08), lineWidth: 1))
     }
 
     private var quickStats: some View {
         HStack(spacing: 8) {
-            StatPill(title: "Credits", value: creditLabel, symbol: "creditcard.fill", tint: MeterPalette.cyan)
+            StatPill(title: "Credits", value: creditLabel, symbol: "creditcard.fill", tint: MeterPalette.blue)
             StatPill(title: "Lifetime", value: tokenLabel(selectedSnapshot?.usage?.lifetimeTokens), symbol: "text.word.spacing", tint: MeterPalette.blue)
-            StatPill(title: "Streak", value: streakLabel, symbol: "flame.fill", tint: MeterPalette.amber)
+            StatPill(title: "Streak", value: streakLabel, symbol: "flame.fill", tint: MeterPalette.blue)
         }
     }
 
@@ -438,15 +430,15 @@ private struct CursorProviderView: View {
                         if let membership = snapshot?.membershipType {
                             Text(planName(membership).uppercased())
                                 .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(MeterPalette.cyan)
+                                .foregroundStyle(MeterPalette.blue)
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 4)
-                                .background(MeterPalette.cyan.opacity(0.12), in: Capsule())
+                                .background(MeterPalette.blue.opacity(0.1), in: Capsule())
                             }
                         }
 
-                    CursorRail(title: "Auto", percent: snapshot?.autoPercentUsed, tint: MeterPalette.cyan)
-                    CursorRail(title: "Models", percent: snapshot?.apiPercentUsed, tint: MeterPalette.blue)
+                    CursorRail(title: "Auto", percent: snapshot?.autoPercentUsed, tint: MeterPalette.blue)
+                    CursorRail(title: "Models", percent: snapshot?.apiPercentUsed, tint: MeterPalette.blue.opacity(0.55))
                 }
 
                 HStack {
@@ -464,18 +456,12 @@ private struct CursorProviderView: View {
                         }
                     }
                 }
-                .padding(10)
-                .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
             }
-            .padding(14)
-            .background(MeterPalette.card, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
-            .shadow(color: .black.opacity(0.08), radius: 8, y: 3)
-            .overlay(RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous).stroke(.white.opacity(0.08), lineWidth: 1))
 
             HStack(spacing: 8) {
                 StatPill(title: "Tokens", value: compact(snapshot?.totalTokens), symbol: "text.word.spacing", tint: MeterPalette.blue)
-                StatPill(title: "On demand", value: money(snapshot?.onDemandUsedCents), symbol: "bolt.fill", tint: MeterPalette.amber)
-                StatPill(title: "Plan left", value: "\(Int((100 - (snapshot?.planPercentUsed ?? 0)).rounded()))%", symbol: "gauge.with.dots.needle.50percent", tint: MeterPalette.cyan)
+                StatPill(title: "On demand", value: money(snapshot?.onDemandUsedCents), symbol: "bolt.fill", tint: MeterPalette.blue)
+                StatPill(title: "Plan left", value: "\(Int((100 - (snapshot?.planPercentUsed ?? 0)).rounded()))%", symbol: "gauge.with.dots.needle.50percent", tint: MeterPalette.blue)
             }
 
             TokenActivityCard(dailyUsage: snapshot?.dailyUsage ?? [])
@@ -639,10 +625,6 @@ private struct TokenActivityCard: View {
             .font(.system(size: 9, weight: .medium))
             .foregroundStyle(.tertiary)
         }
-        .padding(14)
-        .background(MeterPalette.card, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
-        .shadow(color: .black.opacity(0.06), radius: 10, y: 3)
-        .overlay(RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous).stroke(.white.opacity(0.07), lineWidth: 1))
     }
 
     private var dates: [Date] {
@@ -690,10 +672,10 @@ private struct TokenActivityCard: View {
     private func activityColor(value: Int, maximum: Int) -> Color {
         guard value > 0 else { return Color.primary.opacity(0.055) }
         let intensity = Double(value) / Double(maximum)
-        if intensity > 0.74 { return MeterPalette.cyan }
-        if intensity > 0.42 { return MeterPalette.blue.opacity(0.88) }
-        if intensity > 0.16 { return MeterPalette.blue.opacity(0.55) }
-        return MeterPalette.blue.opacity(0.28)
+        if intensity > 0.74 { return MeterPalette.blue }
+        if intensity > 0.42 { return MeterPalette.blue.opacity(0.72) }
+        if intensity > 0.16 { return MeterPalette.blue.opacity(0.42) }
+        return MeterPalette.blue.opacity(0.2)
     }
 }
 

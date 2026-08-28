@@ -3,6 +3,43 @@ import XCTest
 @testable import CodexMeter
 
 final class ModelsTests: XCTestCase {
+    @MainActor
+    func testSwitchAccountUpdatesLiveCodexHome() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let support = root.appendingPathComponent("support")
+        let live = root.appendingPathComponent("live")
+        let firstID = UUID()
+        let secondID = UUID()
+        let firstHome = support.appendingPathComponent("Accounts/\(firstID.uuidString)")
+        let secondHome = support.appendingPathComponent("Accounts/\(secondID.uuidString)")
+        try FileManager.default.createDirectory(at: firstHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: true)
+        try Data("first-live".utf8).write(to: live.appendingPathComponent("auth.json"))
+        try Data("first-stored".utf8).write(to: firstHome.appendingPathComponent("auth.json"))
+        try Data("second-stored".utf8).write(to: secondHome.appendingPathComponent("auth.json"))
+
+        let config: [String: Any] = [
+            "profiles": [
+                ["id": firstID.uuidString, "name": "First", "codexHome": firstHome.path],
+                ["id": secondID.uuidString, "name": "Second", "codexHome": secondHome.path],
+            ],
+            "activeID": firstID.uuidString,
+        ]
+        try FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: config).write(to: support.appendingPathComponent("accounts.json"))
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = AccountStore(appSupport: support, liveCodexHome: live, restartsCodexDesktopOnSwitch: false)
+        store.switchAccount(to: store.profiles[1])
+
+        XCTAssertEqual(store.activeID, secondID)
+        XCTAssertEqual(try Data(contentsOf: live.appendingPathComponent("auth.json")), Data("second-stored".utf8))
+        XCTAssertEqual(try Data(contentsOf: firstHome.appendingPathComponent("auth.json")), Data("first-live".utf8))
+        let permissions = try FileManager.default.attributesOfItem(atPath: live.appendingPathComponent("auth.json").path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.intValue, 0o600)
+    }
+
     func testDecodesRateLimits() throws {
         let data = Data(#"{"rateLimits":{"primary":{"usedPercent":37,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1900100000},"credits":{"hasCredits":true,"unlimited":false,"balance":"12.50"},"individualLimit":null,"planType":"plus"},"rateLimitResetCredits":{"availableCount":2}}"#.utf8)
         let response = try JSONDecoder().decode(RateLimitsResponse.self, from: data)

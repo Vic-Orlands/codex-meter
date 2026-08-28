@@ -8,9 +8,14 @@ The native macOS 14+ menu-bar app shows 5-hour and weekly Codex windows, reset t
 
 ### macOS menu-bar app
 
-Download `CodexMeter-*-macOS.zip` from the [latest release](https://github.com/Vic-Orlands/codex-meter/releases/latest), extract it, and move **Codex Meter.app** to Applications.
+Clone and build the app locally:
 
-Until the app is signed with a Developer ID and notarized, launch it the first time with Control-click → **Open**. Future releases become notarized automatically after the Apple signing secrets documented below are configured.
+```sh
+git clone https://github.com/Vic-Orlands/codex-meter.git
+cd codex-meter
+Scripts/build-app.sh
+open "dist/Codex Meter.app"
+```
 
 Requirements:
 
@@ -23,7 +28,9 @@ Requirements:
 The CLI requires Python 3.9+ and the official Codex CLI. It has no Python package dependencies.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Vic-Orlands/codex-meter/main/Scripts/install-cli.sh | sh
+git clone https://github.com/Vic-Orlands/codex-meter.git
+cd codex-meter
+Scripts/install-cli.sh
 ```
 
 Ensure `~/.local/bin` is on `PATH`, then run:
@@ -61,21 +68,6 @@ Run the CLI tests with:
 ```sh
 python3 -m unittest Tests/cli_test.py
 ```
-
-## Releases and notarization
-
-Pushing a `v*` tag runs the release workflow, tests both products, packages the macOS app and portable CLI, generates SHA-256 checksums, and publishes a GitHub release.
-
-For trusted macOS distribution, add these GitHub Actions secrets:
-
-- `APPLE_CERTIFICATE_BASE64`: Developer ID Application `.p12`, base64 encoded
-- `APPLE_CERTIFICATE_PASSWORD`: password for the `.p12`
-- `APPLE_SIGNING_IDENTITY`: full Developer ID Application identity
-- `APPLE_ID`: Apple developer account email
-- `APPLE_TEAM_ID`: Apple Developer team ID
-- `APPLE_APP_PASSWORD`: app-specific password for notarization
-
-Without those secrets, releases are ad-hoc signed and require the first-launch Control-click described above.
 
 ## Platform scope
 
