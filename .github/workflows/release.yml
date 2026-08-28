@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Import signing certificate
+        if: ${{ env.APPLE_CERTIFICATE_BASE64 != '' }}
+        run: |
+          keychain="$RUNNER_TEMP/codex-meter.keychain-db"
+          certificate="$RUNNER_TEMP/certificate.p12"
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          security create-keychain -p actions "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p actions "$keychain"
+          security import "$certificate" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k actions "$keychain"
+          security list-keychains -d user -s "$keychain"
+      - name: Test
+        run: |
+          swift test
+          python3 -m unittest Tests/cli_test.py
+      - name: Build app
+        env:
+          CODE_SIGN_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+        run: Scripts/build-app.sh
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          app_archive="CodexMeter-${version}-macOS.zip"
+          cli_archive="CodexMeter-${version}-CLI.tar.gz"
+          ditto -c -k --sequesterRsrc --keepParent "dist/Codex Meter.app" "$app_archive"
+          if [[ -n "$APPLE_ID" && -n "$APPLE_TEAM_ID" && -n "$APPLE_APP_PASSWORD" ]]; then
+            xcrun notarytool submit "$app_archive" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+            xcrun stapler staple "dist/Codex Meter.app"
+            rm "$app_archive"
+            ditto -c -k --sequesterRsrc --keepParent "dist/Codex Meter.app" "$app_archive"
+          fi
+          tar -czf "$cli_archive" cli/codex-meter Scripts/install-cli.sh LICENSE
+          shasum -a 256 "$app_archive" "$cli_archive" > SHA256SUMS
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" CodexMeter-*-macOS.zip CodexMeter-*-CLI.tar.gz SHA256SUMS --generate-notes --verify-tag

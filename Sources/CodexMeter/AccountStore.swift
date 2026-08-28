@@ -1,0 +1,200 @@
+import AppKit
+import Foundation
+
+@MainActor
+final class AccountStore: ObservableObject {
+    @Published private(set) var profiles: [AccountProfile] = []
+    @Published private(set) var snapshots: [UUID: AccountSnapshot] = [:]
+    @Published private(set) var activeID: UUID?
+    @Published private(set) var cursorSnapshot: CursorSnapshot?
+    @Published private(set) var cursorError: String?
+    @Published private(set) var isRefreshing = false
+    @Published var alertMessage: String?
+
+    @Published var customCodexPath: String {
+        didSet { UserDefaults.standard.set(customCodexPath, forKey: "customCodexPath") }
+    }
+
+    private let fileManager: FileManager
+    private let appSupport: URL
+    private let liveCodexHome: URL
+    private var refreshTask: Task<Void, Never>?
+    private var lastCursorActivityRefresh: Date?
+    private var hasStarted = false
+    private var configURL: URL { appSupport.appendingPathComponent("accounts.json") }
+
+    init(fileManager: FileManager = .default, appSupport: URL? = nil, liveCodexHome: URL? = nil) {
+        self.fileManager = fileManager
+        self.appSupport = appSupport ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("CodexMeter", isDirectory: true)
+        self.liveCodexHome = liveCodexHome ?? fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+        self.customCodexPath = UserDefaults.standard.string(forKey: "customCodexPath") ?? ""
+        load()
+    }
+
+    var activeSnapshot: AccountSnapshot? { activeID.flatMap { snapshots[$0] } }
+
+    func start() {
+        guard !hasStarted else { return }
+        hasStarted = true
+        do {
+            try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            if profiles.isEmpty { try importCurrentAccount() }
+            refresh()
+            refreshTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(60))
+                    self?.refresh()
+                }
+            }
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func refresh() {
+        guard !isRefreshing else { return }
+        if let active = activeID.flatMap({ id in profiles.first(where: { $0.id == id }) }) {
+            let liveAuth = liveCodexHome.appendingPathComponent("auth.json")
+            if fileManager.fileExists(atPath: liveAuth.path) {
+                try? atomicCopy(from: liveAuth, to: active.homeURL.appendingPathComponent("auth.json"))
+            }
+        }
+        isRefreshing = true
+        let profilesToRefresh = profiles
+        let executable = CodexAppServer.locateExecutable(customPath: customCodexPath)
+        let includeCursorActivity = lastCursorActivityRefresh.map { Date().timeIntervalSince($0) >= 3600 } ?? true
+
+        Task.detached(priority: .userInitiated) {
+            var results: [UUID: Result<AccountSnapshot, Error>] = [:]
+            for profile in profilesToRefresh {
+                results[profile.id] = Result { try CodexAppServer.snapshot(codexHome: profile.homeURL, executable: executable) }
+            }
+            let completedResults = results
+            let cursorResult: Result<CursorSnapshot, Error>
+            do {
+                cursorResult = .success(try await CursorUsageClient.snapshot(includeActivity: includeCursorActivity))
+            } catch {
+                cursorResult = .failure(error)
+            }
+            await MainActor.run {
+                for (id, result) in completedResults {
+                    if case .success(let snapshot) = result { self.snapshots[id] = snapshot }
+                }
+                switch cursorResult {
+                case .success(var snapshot):
+                    if !includeCursorActivity, let existing = self.cursorSnapshot {
+                        snapshot.dailyUsage = existing.dailyUsage
+                        snapshot.totalTokens = existing.totalTokens
+                    }
+                    self.cursorSnapshot = snapshot
+                    self.cursorError = nil
+                    if includeCursorActivity { self.lastCursorActivityRefresh = Date() }
+                case .failure(let error):
+                    self.cursorError = error.localizedDescription
+                }
+                self.isRefreshing = false
+                if completedResults.values.allSatisfy({ if case .failure = $0 { true } else { false } }), let first = completedResults.values.first,
+                   case .failure(let error) = first {
+                    self.alertMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func addAccount() {
+        let id = UUID()
+        let home = appSupport.appendingPathComponent("Accounts/\(id.uuidString)", isDirectory: true)
+        let name = "Account \(profiles.count + 1)"
+        let executable = CodexAppServer.locateExecutable(customPath: customCodexPath)
+        isRefreshing = true
+
+        Task.detached(priority: .userInitiated) {
+            do {
+                let snapshot = try CodexAppServer.login(codexHome: home, executable: executable) { url in
+                    DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+                }
+                await MainActor.run {
+                    let profile = AccountProfile(id: id, name: snapshot.email ?? name, codexHome: home.path)
+                    self.profiles.append(profile)
+                    self.snapshots[id] = snapshot
+                    self.isRefreshing = false
+                    self.save()
+                }
+            } catch {
+                await MainActor.run {
+                    self.isRefreshing = false
+                    self.alertMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func switchAccount(to profile: AccountProfile) {
+        do {
+            let liveAuth = liveCodexHome.appendingPathComponent("auth.json")
+            if let current = activeID.flatMap({ id in profiles.first(where: { $0.id == id }) }), fileManager.fileExists(atPath: liveAuth.path) {
+                try atomicCopy(from: liveAuth, to: current.homeURL.appendingPathComponent("auth.json"))
+            }
+            let selectedAuth = profile.homeURL.appendingPathComponent("auth.json")
+            guard fileManager.fileExists(atPath: selectedAuth.path) else { throw CodexMeterError.missingAuth }
+            try fileManager.createDirectory(at: liveCodexHome, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try atomicCopy(from: selectedAuth, to: liveAuth)
+            activeID = profile.id
+            save()
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+
+    func rename(_ profile: AccountProfile, to name: String) {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return }
+        profiles[index].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        save()
+    }
+
+    private func importCurrentAccount() throws {
+        let source = liveCodexHome.appendingPathComponent("auth.json")
+        guard fileManager.fileExists(atPath: source.path) else { return }
+        let id = UUID()
+        let home = appSupport.appendingPathComponent("Accounts/\(id.uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: home, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        try atomicCopy(from: source, to: home.appendingPathComponent("auth.json"))
+        profiles = [AccountProfile(id: id, name: "Current account", codexHome: home.path)]
+        activeID = id
+        save()
+    }
+
+    private func atomicCopy(from source: URL, to destination: URL) throws {
+        try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let temporary = destination.deletingLastPathComponent().appendingPathComponent(".auth-\(UUID().uuidString).tmp")
+        try fileManager.copyItem(at: source, to: temporary)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+        if fileManager.fileExists(atPath: destination.path) {
+            _ = try fileManager.replaceItemAt(destination, withItemAt: temporary)
+        } else {
+            try fileManager.moveItem(at: temporary, to: destination)
+        }
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: configURL),
+              let config = try? JSONDecoder().decode(AccountConfig.self, from: data) else { return }
+        profiles = config.profiles
+        activeID = config.activeID
+    }
+
+    private func save() {
+        do {
+            try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let data = try JSONEncoder().encode(AccountConfig(profiles: profiles, activeID: activeID))
+            try data.write(to: configURL, options: .atomic)
+        } catch {
+            alertMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct AccountConfig: Codable {
+    let profiles: [AccountProfile]
+    let activeID: UUID?
+}

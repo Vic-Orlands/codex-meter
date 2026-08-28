@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import select
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+
+class AppServer:
+    def __init__(self, executable, codex_home, timeout):
+        environment = os.environ.copy()
+        environment["CODEX_HOME"] = str(codex_home)
+        self.timeout = timeout
+        self.next_id = 1
+        self.process = subprocess.Popen(
+            [executable, "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=environment,
+        )
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+
+    def send(self, payload):
+        self.process.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        self.process.stdin.flush()
+
+    def read(self):
+        ready, _, _ = select.select([self.process.stdout], [], [], self.timeout)
+        if not ready:
+            raise RuntimeError("Codex app-server timed out")
+        line = self.process.stdout.readline()
+        if not line:
+            error = self.process.stderr.read().strip()
+            raise RuntimeError(error or "Codex app-server closed unexpectedly")
+        return json.loads(line)
+
+    def request(self, method, params=None, optional=False):
+        request_id = self.next_id
+        self.next_id += 1
+        self.send({"method": method, "id": request_id, "params": params or {}})
+        while True:
+            message = self.read()
+            if message.get("id") != request_id:
+                continue
+            if "error" in message:
+                if optional:
+                    return None
+                error = message["error"]
+                raise RuntimeError(error.get("message", str(error)) if isinstance(error, dict) else str(error))
+            return message.get("result")
+
+    def initialize(self):
+        self.request(
+            "initialize",
+            {
+                "clientInfo": {"name": "codex-meter-cli", "title": "Codex Meter CLI", "version": "0.1.0"},
+                "capabilities": {"experimentalApi": True},
+            },
+        )
+        self.send({"method": "initialized", "params": {}})
+
+
+def snapshot(executable, codex_home, timeout):
+    server = AppServer(executable, codex_home, timeout)
+    try:
+        server.initialize()
+        account = server.request("account/read", {"refreshToken": False})
+        limits = server.request("account/rateLimits/read")
+        usage = server.request("account/usage/read", optional=True)
+        return {
+            "account": (account or {}).get("account"),
+            "rateLimits": (limits or {}).get("rateLimits"),
+            "rateLimitResetCredits": (limits or {}).get("rateLimitResetCredits"),
+            "usage": usage,
+            "fetchedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+    finally:
+        server.close()
+
+
+def duration(seconds):
+    seconds = max(0, int(seconds))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes = seconds // 60
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes or not parts:
+        parts.append(f"{minutes}m")
+    return " ".join(parts[:2])
+
+
+def window_line(name, window):
+    if not window:
+        return f"{name:<8} unavailable"
+    used = int(window.get("usedPercent", 0))
+    remaining = max(0, min(100, 100 - used))
+    reset = window.get("resetsAt")
+    reset_text = "reset unavailable"
+    if reset:
+        reset_text = f"resets in {duration(float(reset) - time.time())}"
+    return f"{name:<8} {remaining:>3}% left  ·  {used}% used  ·  {reset_text}"
+
+
+def render(data):
+    account = data.get("account") or {}
+    limits = data.get("rateLimits") or {}
+    usage = (data.get("usage") or {}).get("summary") or {}
+    credits = limits.get("credits") or {}
+    email = account.get("email") or "Signed out"
+    plan = account.get("planType") or limits.get("planType") or "Unknown plan"
+    lines = [f"Codex Meter  ·  {email}  ·  {plan}"]
+    lines.append(window_line("5-hour", limits.get("primary")))
+    lines.append(window_line("Weekly", limits.get("secondary")))
+    if credits.get("unlimited"):
+        credit_text = "Unlimited"
+    else:
+        credit_text = credits.get("balance") or ("Available" if credits.get("hasCredits") else "None")
+    lines.append(f"Credits   {credit_text}")
+    if usage.get("lifetimeTokens") is not None:
+        lines.append(f"Tokens    {int(usage['lifetimeTokens']):,} lifetime")
+    return "\n".join(lines)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Show Codex limits without reading auth.json")
+    parser.add_argument("--json", action="store_true", help="print the raw usage snapshot as JSON")
+    parser.add_argument("--watch", type=float, metavar="SECONDS", help="refresh continuously")
+    parser.add_argument("--codex", help="path to the Codex executable")
+    parser.add_argument("--codex-home", default=os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    parser.add_argument("--timeout", type=float, default=20)
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    executable = args.codex or shutil.which("codex")
+    if not executable:
+        raise RuntimeError("Codex CLI was not found. Install Codex or pass --codex PATH")
+    while True:
+        data = snapshot(executable, Path(args.codex_home).expanduser(), args.timeout)
+        if args.watch and sys.stdout.isatty():
+            print("\033[2J\033[H", end="")
+        print(json.dumps(data, indent=2) if args.json else render(data), flush=True)
+        if not args.watch:
+            return
+        time.sleep(max(1, args.watch))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except Exception as error:
+        print(f"codex-meter: {error}", file=sys.stderr)
+        sys.exit(1)
