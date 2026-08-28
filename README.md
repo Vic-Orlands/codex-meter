@@ -2,7 +2,29 @@
 
 Codex Meter keeps Codex and Cursor limits visible without handing credentials to an authentication library.
 
-The native macOS 14+ menu-bar app shows 5-hour and weekly Codex windows, reset times, credits, account switching, Cursor plan usage, and a 16-week token activity view. A dependency-free command-line edition provides Codex usage on macOS and Linux.
+![Codex Meter menu-bar interface](docs/images/codex-meter-preview.png)
+
+
+## Why I built it
+
+I built Codex Meter because checking usage limits and moving between accounts felt more awkward than it needed to be; I had to log out and then sign into the next account and with codex current logout error I get when I log out, it was even more pertinent that I build it for myself.
+
+I wanted one calm, dependable place where I could see the information that matters, switch accounts quickly, and get back to work without digging through dashboards unnecessary sign out and sign in.
+
+Privacy also mattered just as much as I did not want to hand my `auth.json` file to an unfamiliar package or authentication library. There are other libs that do this same thing though but I have llm tokens and it's a simple app so why not. Codex Meter works with the official Codex app server and keeps account credentials on the Mac. The result is a small, focused utility that feels native, stays out of the way, and makes everyday Codex use noticeably smoother.
+
+## What it does
+
+Codex Meter brings the essential details from Codex and Cursor into a polished menu-bar interface (See image above). It is designed to be quick to read, pleasantly compact, and genuinely useful throughout the day.
+
+- Shows the current 5-hour and weekly Codex limits, remaining percentages, and reset times.
+- Displays available credits, lifetime token usage, and activity streaks.
+- Keeps multiple Codex accounts organised and switches the desktop app to the selected account.
+- Shows Cursor plan usage, on-demand spending, token totals, and billing-cycle timing.
+- Presents token activity in a clear 16-week heatmap with daily, weekly, and cumulative views.
+- Refreshes usage automatically and provides a manual refresh whenever you need the latest figures.
+- Includes a lightweight, dependency-free CLI for macOS and Linux.
+- Keeps credentials local, with no analytics, telemetry, or remote database.
 
 ## Install
 

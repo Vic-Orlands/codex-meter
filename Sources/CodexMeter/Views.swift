@@ -250,7 +250,7 @@ struct MenuContentView: View {
     }
 
     private func accountPanel(profile: AccountProfile) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
             accountStrip.zIndex(2)
             accountHero(profile: profile)
                 .id(profile.id)
@@ -302,7 +302,9 @@ struct MenuContentView: View {
                 .background(MeterPalette.blue, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
             }
         }
+        .padding(12)
         .frame(maxWidth: .infinity)
+        .background(MeterPalette.card, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
     }
 
     private var quickStats: some View {
@@ -457,6 +459,8 @@ private struct CursorProviderView: View {
                     }
                 }
             }
+            .padding(12)
+            .background(MeterPalette.card, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
 
             HStack(spacing: 8) {
                 StatPill(title: "Tokens", value: compact(snapshot?.totalTokens), symbol: "text.word.spacing", tint: MeterPalette.blue)
@@ -595,7 +599,9 @@ private struct TokenActivityCard: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .frame(width: 170)
+                .font(.system(size: 10, weight: .medium))
+                .controlSize(.small)
+                .frame(width: 155)
             }
 
             let values = activityValues
@@ -615,6 +621,8 @@ private struct TokenActivityCard: View {
                 }
             }
             .frame(height: 74)
+            .padding(8)
+            .background(MeterPalette.card, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
             .animation(.easeOut(duration: 0.2), value: mode)
 
             HStack {
