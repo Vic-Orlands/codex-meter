@@ -9,7 +9,7 @@ jobs:
   macos-app:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: swift test
       - run: Scripts/build-app.sh
 
@@ -19,6 +19,6 @@ jobs:
         os: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: python3 -m unittest Tests/cli_test.py
       - run: python3 -m py_compile cli/codex-meter
