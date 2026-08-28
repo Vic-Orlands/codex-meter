@@ -246,11 +246,11 @@ struct MenuContentView: View {
                 .help("Add account")
             }
         }
-        .frame(height: 35)
+        .frame(height: 30)
     }
 
     private func accountPanel(profile: AccountProfile) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: -1) {
             accountStrip.zIndex(2)
             accountHero(profile: profile)
                 .id(profile.id)
@@ -304,7 +304,16 @@ struct MenuContentView: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity)
-        .background(MeterPalette.card, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
+        .background(
+            MeterPalette.card,
+            in: UnevenRoundedRectangle(
+                topLeadingRadius: 0,
+                bottomLeadingRadius: MeterPalette.radius,
+                bottomTrailingRadius: MeterPalette.radius,
+                topTrailingRadius: MeterPalette.radius,
+                style: .continuous
+            )
+        )
     }
 
     private var quickStats: some View {
