@@ -72,38 +72,78 @@ final class AccountStore: ObservableObject {
         let includeCursorActivity = lastCursorActivityRefresh.map { Date().timeIntervalSince($0) >= 3600 } ?? true
 
         Task.detached(priority: .userInitiated) {
-            var results: [UUID: Result<AccountSnapshot, Error>] = [:]
-            for profile in profilesToRefresh {
-                results[profile.id] = Result { try CodexAppServer.snapshot(codexHome: profile.homeURL, executable: executable) }
-            }
-            let completedResults = results
-            let cursorResult: Result<CursorSnapshot, Error>
-            do {
-                cursorResult = .success(try await CursorUsageClient.snapshot(includeActivity: includeCursorActivity))
-            } catch {
-                cursorResult = .failure(error)
-            }
-            await MainActor.run {
-                for (id, result) in completedResults {
-                    if case .success(let snapshot) = result { self.snapshots[id] = snapshot }
-                }
-                switch cursorResult {
-                case .success(var snapshot):
-                    if !includeCursorActivity, let existing = self.cursorSnapshot {
-                        snapshot.dailyUsage = existing.dailyUsage
-                        snapshot.totalTokens = existing.totalTokens
+            await withTaskGroup(of: RefreshResult.self) { group in
+                group.addTask {
+                    let results = await withTaskGroup(of: (UUID, Result<AccountSnapshot, Error>).self) { accountGroup in
+                        for profile in profilesToRefresh {
+                            accountGroup.addTask {
+                                do {
+                                    return (profile.id, .success(try CodexAppServer.snapshot(codexHome: profile.homeURL, executable: executable)))
+                                } catch {
+                                    return (profile.id, .failure(error))
+                                }
+                            }
+                        }
+                        var results: [UUID: Result<AccountSnapshot, Error>] = [:]
+                        for await (id, result) in accountGroup { results[id] = result }
+                        return results
                     }
-                    self.cursorSnapshot = snapshot
-                    self.cursorError = nil
-                    if includeCursorActivity { self.lastCursorActivityRefresh = Date() }
-                case .failure(let error):
-                    self.cursorError = error.localizedDescription
+                    return .accounts(results)
                 }
-                self.isRefreshing = false
-                if completedResults.values.allSatisfy({ if case .failure = $0 { true } else { false } }), let first = completedResults.values.first,
-                   case .failure(let error) = first {
-                    self.alertMessage = error.localizedDescription
+
+                group.addTask {
+                    do {
+                        return .cursor(.success(try await CursorUsageClient.snapshot(includeActivity: false)))
+                    } catch {
+                        return .cursor(.failure(error))
+                    }
                 }
+
+                for await result in group {
+                    switch result {
+                    case .accounts(let results):
+                        await MainActor.run {
+                            for (id, result) in results {
+                                if case .success(let snapshot) = result { self.snapshots[id] = snapshot }
+                            }
+                            if !results.isEmpty,
+                               results.values.allSatisfy({ if case .failure = $0 { true } else { false } }),
+                               let first = results.values.first,
+                               case .failure(let error) = first {
+                                self.alertMessage = error.localizedDescription
+                            }
+                        }
+                    case .cursor(let result):
+                        switch result {
+                        case .success(let snapshot):
+                            await MainActor.run {
+                                var updated = snapshot
+                                if let existing = self.cursorSnapshot {
+                                    updated.dailyUsage = existing.dailyUsage
+                                    updated.totalTokens = existing.totalTokens
+                                }
+                                self.cursorSnapshot = updated
+                                self.cursorError = nil
+                            }
+                            if includeCursorActivity {
+                                await MainActor.run { self.lastCursorActivityRefresh = Date() }
+                                Task.detached(priority: .utility) {
+                                    guard let activity = try? await CursorUsageClient.activity() else { return }
+                                    await MainActor.run {
+                                        guard var current = self.cursorSnapshot else { return }
+                                        current.dailyUsage = activity.dailyUsage
+                                        current.totalTokens = activity.totalTokens
+                                        self.cursorSnapshot = current
+                                    }
+                                }
+                            }
+                        case .failure(let error):
+                            await MainActor.run { self.cursorError = error.localizedDescription }
+                        }
+                    }
+                }
+
+                await MainActor.run { self.isRefreshing = false }
             }
         }
     }
@@ -230,4 +270,9 @@ final class AccountStore: ObservableObject {
 private struct AccountConfig: Codable {
     let profiles: [AccountProfile]
     let activeID: UUID?
+}
+
+private enum RefreshResult {
+    case accounts([UUID: Result<AccountSnapshot, Error>])
+    case cursor(Result<CursorSnapshot, Error>)
 }

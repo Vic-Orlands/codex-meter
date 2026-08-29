@@ -18,6 +18,11 @@ struct CursorSnapshot: Equatable {
     let fetchedAt: Date
 }
 
+struct CursorActivitySnapshot: Equatable {
+    let dailyUsage: [DailyUsageBucket]
+    let totalTokens: Int
+}
+
 enum CursorProviderError: LocalizedError {
     case cursorNotInstalled
     case signedOut
@@ -73,6 +78,15 @@ enum CursorUsageClient {
             dailyUsage: activity?.daily ?? [],
             fetchedAt: Date()
         )
+    }
+
+    static func activity() async throws -> CursorActivitySnapshot {
+        let token = try CursorTokenStore().load()
+        let identity = try CursorIdentity(token: token)
+        guard identity.expiresAt.timeIntervalSinceNow > 60 else { throw CursorProviderError.sessionExpired }
+        let cookie = "WorkosCursorSessionToken=\(identity.userID)%3A%3A\(token)"
+        let activity = try await fetchActivity(cookie: cookie)
+        return CursorActivitySnapshot(dailyUsage: activity.daily, totalTokens: activity.totalTokens)
     }
 
     private static func request(path: String, cookie: String) async throws -> Data {

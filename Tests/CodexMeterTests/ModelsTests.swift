@@ -61,6 +61,12 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(RateLimitWindow(usedPercent: 130, windowDurationMins: nil, resetsAt: nil).remainingPercent, 0)
     }
 
+    func testRetriesTransientAppServerTransportErrors() {
+        XCTAssertTrue(CodexAppServer.shouldRetry(CodexMeterError.server("error sending request for url")))
+        XCTAssertTrue(CodexAppServer.shouldRetry(CodexMeterError.server("The network connection was lost")))
+        XCTAssertFalse(CodexAppServer.shouldRetry(CodexMeterError.signedOut))
+    }
+
     func testLiveOfficialAppServerWhenEnabled() throws {
         guard ProcessInfo.processInfo.environment["CODEX_METER_LIVE_TEST"] == "1" else {
             throw XCTSkip("Set CODEX_METER_LIVE_TEST=1 to test the installed official Codex app-server.")

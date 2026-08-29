@@ -2,6 +2,29 @@ import Foundation
 
 enum CodexAppServer {
     static func snapshot(codexHome: URL, executable: URL? = nil) throws -> AccountSnapshot {
+        var lastError: Error?
+        for attempt in 0..<2 {
+            do {
+                return try snapshotOnce(codexHome: codexHome, executable: executable)
+            } catch {
+                lastError = error
+                guard attempt == 0, shouldRetry(error) else { throw error }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+        }
+        throw lastError ?? CodexMeterError.invalidResponse
+    }
+
+    static func shouldRetry(_ error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        return message.contains("error sending request")
+            || message.contains("failed to fetch")
+            || message.contains("timed out")
+            || message.contains("connection reset")
+            || message.contains("network connection")
+    }
+
+    private static func snapshotOnce(codexHome: URL, executable: URL?) throws -> AccountSnapshot {
         let session = try Session(codexHome: codexHome, executable: executable, timeout: 20)
         defer { session.stop() }
         try session.initialize()
