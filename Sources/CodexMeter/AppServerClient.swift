@@ -1,4 +1,5 @@
 import Foundation
+import SystemConfiguration
 
 enum CodexAppServer {
     static func snapshot(codexHome: URL, executable: URL? = nil) throws -> AccountSnapshot {
@@ -8,8 +9,8 @@ enum CodexAppServer {
                 return try snapshotOnce(codexHome: codexHome, executable: executable)
             } catch {
                 lastError = error
-                guard attempt == 0, shouldRetry(error) else { throw error }
-                Thread.sleep(forTimeInterval: 0.5)
+                guard shouldRetry(error), attempt == 0 else { throw error }
+                Thread.sleep(forTimeInterval: 1.2)
             }
         }
         throw lastError ?? CodexMeterError.invalidResponse
@@ -22,16 +23,28 @@ enum CodexAppServer {
             || message.contains("timed out")
             || message.contains("connection reset")
             || message.contains("network connection")
+            || message.contains("connection was lost")
+            || message.contains("could not resolve")
+            || message.contains("closed unexpectedly")
+    }
+
+    static func userFacingMessage(for error: Error) -> String {
+        let raw = error.localizedDescription
+        let lower = raw.lowercased()
+        if lower.contains("error sending request") || lower.contains("failed to fetch") {
+            return "Couldn’t reach ChatGPT usage. Check your network, VPN, or HTTP proxy. GUI apps don’t inherit proxy settings from ~/.zshrc."
+        }
+        return raw
     }
 
     private static func snapshotOnce(codexHome: URL, executable: URL?) throws -> AccountSnapshot {
-        let session = try Session(codexHome: codexHome, executable: executable, timeout: 20)
+        let session = try Session(codexHome: codexHome, executable: executable, timeout: 30)
         defer { session.stop() }
         try session.initialize()
 
         let account: AccountResponse = try session.request("account/read", params: ["refreshToken": false])
         guard let details = account.account else { throw CodexMeterError.signedOut }
-        let limits: RateLimitsResponse = try session.request("account/rateLimits/read")
+        let limits: RateLimitsResponse = try session.requestRetrying("account/rateLimits/read")
         let usage = try? session.request("account/usage/read", as: UsageResponse.self)
 
         return AccountSnapshot(
@@ -74,7 +87,128 @@ enum CodexAppServer {
             "/usr/local/bin/codex",
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex").path
         ].compactMap { $0 }.filter { !$0.isEmpty }
-        return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }).map(URL.init(fileURLWithPath:))
+        guard let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            return nil
+        }
+        return CodexLaunchEnvironment.resolveNativeExecutable(URL(fileURLWithPath: path))
+    }
+}
+
+enum CodexLaunchEnvironment {
+    static let proxyKeys = [
+        "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+        "http_proxy", "https_proxy", "all_proxy", "no_proxy"
+    ]
+
+    static func make(codexHome: URL, executable: URL, processEnvironment: [String: String] = ProcessInfo.processInfo.environment) -> [String: String] {
+        var environment = processEnvironment
+        merge(proxyVariables: systemProxyVariables(), into: &environment)
+        environment["PATH"] = augmentedPath(environment["PATH"], executable: executable)
+        environment["CODEX_HOME"] = codexHome.path
+        environment["HOME"] = environment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+        return environment
+    }
+
+    static func augmentedPath(_ existing: String?, executable: URL) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let extras = [
+            executable.deletingLastPathComponent().path,
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            home.appendingPathComponent(".local/bin").path,
+            "/usr/bin",
+            "/bin"
+        ]
+        var parts = extras
+        for part in (existing ?? "").split(separator: ":").map(String.init) where !part.isEmpty && !parts.contains(part) {
+            parts.append(part)
+        }
+        return parts.joined(separator: ":")
+    }
+
+    static func resolveNativeExecutable(_ url: URL) -> URL {
+        let resolved = url.resolvingSymlinksInPath()
+        guard isShebangScript(resolved) else { return url }
+        let packageRoot = resolved.deletingLastPathComponent().deletingLastPathComponent()
+        let triple = currentTriple()
+        let candidates = [
+            packageRoot.appendingPathComponent("vendor/\(triple)/bin/codex"),
+            packageRoot.appendingPathComponent("node_modules/@openai/codex-darwin-arm64/vendor/\(triple)/bin/codex"),
+            packageRoot.appendingPathComponent("node_modules/@openai/codex-darwin-x64/vendor/\(triple)/bin/codex"),
+            packageRoot.appendingPathComponent("node_modules/@openai/codex-linux-arm64/vendor/\(triple)/bin/codex"),
+            packageRoot.appendingPathComponent("node_modules/@openai/codex-linux-x64/vendor/\(triple)/bin/codex")
+        ]
+        return candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0.path) }) ?? url
+    }
+
+    static func isShebangScript(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        return handle.readData(ofLength: 2) == Data([0x23, 0x21])
+    }
+
+    static func currentTriple() -> String {
+        #if arch(arm64)
+        return "aarch64-apple-darwin"
+        #else
+        return "x86_64-apple-darwin"
+        #endif
+    }
+
+    static func merge(proxyVariables: [String: String], into environment: inout [String: String]) {
+        for (key, value) in proxyVariables where environment[key]?.isEmpty != false && !value.isEmpty {
+            environment[key] = value
+        }
+    }
+
+    static func systemProxyVariables() -> [String: String] {
+        guard let settings = SCDynamicStoreCopyProxies(nil) as? [String: Any] else { return [:] }
+        var variables: [String: String] = [:]
+
+        if let https = proxyURL(
+            enabled: settings[kSCPropNetProxiesHTTPSEnable as String] as? Int,
+            host: settings[kSCPropNetProxiesHTTPSProxy as String] as? String,
+            port: settings[kSCPropNetProxiesHTTPSPort as String] as? Int
+        ) {
+            variables["HTTPS_PROXY"] = https
+            variables["https_proxy"] = https
+        }
+
+        if let http = proxyURL(
+            enabled: settings[kSCPropNetProxiesHTTPEnable as String] as? Int,
+            host: settings[kSCPropNetProxiesHTTPProxy as String] as? String,
+            port: settings[kSCPropNetProxiesHTTPPort as String] as? Int
+        ) {
+            variables["HTTP_PROXY"] = http
+            variables["http_proxy"] = http
+            if variables["HTTPS_PROXY"] == nil {
+                variables["HTTPS_PROXY"] = http
+                variables["https_proxy"] = http
+            }
+        }
+
+        if let socks = proxyURL(
+            enabled: settings[kSCPropNetProxiesSOCKSEnable as String] as? Int,
+            host: settings[kSCPropNetProxiesSOCKSProxy as String] as? String,
+            port: settings[kSCPropNetProxiesSOCKSPort as String] as? Int,
+            scheme: "socks5"
+        ), variables["HTTP_PROXY"] == nil, variables["HTTPS_PROXY"] == nil {
+            variables["ALL_PROXY"] = socks
+            variables["all_proxy"] = socks
+        }
+
+        if let exceptions = settings[kSCPropNetProxiesExceptionsList as String] as? [String], !exceptions.isEmpty {
+            let value = exceptions.joined(separator: ",")
+            variables["NO_PROXY"] = value
+            variables["no_proxy"] = value
+        }
+
+        return variables
+    }
+
+    private static func proxyURL(enabled: Int?, host: String?, port: Int?, scheme: String = "http") -> String? {
+        guard enabled == 1, let host, !host.isEmpty, let port, port > 0 else { return nil }
+        return "\(scheme)://\(host):\(port)"
     }
 }
 
@@ -84,6 +218,8 @@ private final class Session {
     private let output = Pipe()
     private let errorOutput = Pipe()
     private var buffered = Data()
+    private var stderr = Data()
+    private let stderrLock = NSLock()
     private var nextID = 1
     private let timeout: TimeInterval
     private var deadline: Date
@@ -97,12 +233,18 @@ private final class Session {
         try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
         process.executableURL = executable
         process.arguments = ["app-server", "--stdio"]
-        var environment = ProcessInfo.processInfo.environment
-        environment["CODEX_HOME"] = codexHome.path
-        process.environment = environment
+        process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
+        process.environment = CodexLaunchEnvironment.make(codexHome: codexHome, executable: executable)
         process.standardInput = input
         process.standardOutput = output
         process.standardError = errorOutput
+        errorOutput.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            self?.stderrLock.lock()
+            self?.stderr.append(data)
+            self?.stderrLock.unlock()
+        }
         try process.run()
     }
 
@@ -132,6 +274,20 @@ private final class Session {
         return try JSONDecoder().decode(T.self, from: data)
     }
 
+    func requestRetrying<T: Decodable>(_ method: String, params: [String: Any] = [:], as type: T.Type = T.self) throws -> T {
+        var lastError: Error?
+        for attempt in 0..<2 {
+            do {
+                return try request(method, params: params, as: type)
+            } catch {
+                lastError = error
+                guard CodexAppServer.shouldRetry(error), attempt == 0 else { throw error }
+                Thread.sleep(forTimeInterval: 1.2)
+            }
+        }
+        throw lastError ?? CodexMeterError.invalidResponse
+    }
+
     func waitForNotification(_ method: String, loginId: String) throws {
         while Date() < deadline {
             let object = try readObject()
@@ -147,6 +303,7 @@ private final class Session {
     }
 
     func stop() {
+        errorOutput.fileHandleForReading.readabilityHandler = nil
         try? input.fileHandleForWriting.close()
         if process.isRunning { process.terminate() }
     }
@@ -172,7 +329,7 @@ private final class Session {
     }
 
     private func readObject() throws -> [String: Any] {
-        while true {
+        while Date() < deadline {
             if let newline = buffered.firstIndex(of: 0x0A) {
                 let line = buffered[..<newline]
                 buffered.removeSubrange(...newline)
@@ -182,11 +339,22 @@ private final class Session {
                 return object
             }
             let chunk = output.fileHandleForReading.availableData
-            guard !chunk.isEmpty else {
-                let errorText = String(data: errorOutput.fileHandleForReading.availableData, encoding: .utf8) ?? ""
-                throw CodexMeterError.server(errorText.isEmpty ? "Codex app-server closed unexpectedly." : errorText)
+            if chunk.isEmpty {
+                if process.isRunning {
+                    Thread.sleep(forTimeInterval: 0.05)
+                    continue
+                }
+                throw CodexMeterError.server(stderrText().isEmpty ? "Codex app-server closed unexpectedly." : stderrText())
             }
             buffered.append(chunk)
         }
+        throw CodexMeterError.server("Codex app-server timed out.")
+    }
+
+    private func stderrText() -> String {
+        stderrLock.lock()
+        defer { stderrLock.unlock() }
+        return String(data: stderr, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 }

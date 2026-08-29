@@ -8,6 +8,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var activeID: UUID?
     @Published private(set) var cursorSnapshot: CursorSnapshot?
     @Published private(set) var cursorError: String?
+    @Published private(set) var accountErrors: [UUID: String] = [:]
     @Published private(set) var isRefreshing = false
     @Published var alertMessage: String?
 
@@ -74,19 +75,13 @@ final class AccountStore: ObservableObject {
         Task.detached(priority: .userInitiated) {
             await withTaskGroup(of: RefreshResult.self) { group in
                 group.addTask {
-                    let results = await withTaskGroup(of: (UUID, Result<AccountSnapshot, Error>).self) { accountGroup in
-                        for profile in profilesToRefresh {
-                            accountGroup.addTask {
-                                do {
-                                    return (profile.id, .success(try CodexAppServer.snapshot(codexHome: profile.homeURL, executable: executable)))
-                                } catch {
-                                    return (profile.id, .failure(error))
-                                }
-                            }
+                    var results: [UUID: Result<AccountSnapshot, Error>] = [:]
+                    for profile in profilesToRefresh {
+                        do {
+                            results[profile.id] = .success(try CodexAppServer.snapshot(codexHome: profile.homeURL, executable: executable))
+                        } catch {
+                            results[profile.id] = .failure(error)
                         }
-                        var results: [UUID: Result<AccountSnapshot, Error>] = [:]
-                        for await (id, result) in accountGroup { results[id] = result }
-                        return results
                     }
                     return .accounts(results)
                 }
@@ -104,13 +99,18 @@ final class AccountStore: ObservableObject {
                     case .accounts(let results):
                         await MainActor.run {
                             for (id, result) in results {
-                                if case .success(let snapshot) = result { self.snapshots[id] = snapshot }
+                                switch result {
+                                case .success(let snapshot):
+                                    self.snapshots[id] = snapshot
+                                    self.accountErrors[id] = nil
+                                case .failure(let error):
+                                    self.accountErrors[id] = CodexAppServer.userFacingMessage(for: error)
+                                }
                             }
-                            if !results.isEmpty,
-                               results.values.allSatisfy({ if case .failure = $0 { true } else { false } }),
-                               let first = results.values.first,
-                               case .failure(let error) = first {
-                                self.alertMessage = error.localizedDescription
+                            let allFailed = !results.isEmpty && results.values.allSatisfy { if case .failure = $0 { true } else { false } }
+                            if allFailed, self.snapshots.isEmpty,
+                               let first = results.values.first, case .failure(let error) = first {
+                                self.alertMessage = CodexAppServer.userFacingMessage(for: error)
                             }
                         }
                     case .cursor(let result):
@@ -170,7 +170,7 @@ final class AccountStore: ObservableObject {
             } catch {
                 await MainActor.run {
                     self.isRefreshing = false
-                    self.alertMessage = error.localizedDescription
+                    self.alertMessage = CodexAppServer.userFacingMessage(for: error)
                 }
             }
         }

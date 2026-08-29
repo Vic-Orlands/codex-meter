@@ -284,6 +284,13 @@ struct MenuContentView: View {
                     }
                 }
 
+                if let error = store.accountErrors[profile.id] {
+                    Text(error)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 QuotaRail(title: "5-hour", window: limits?.primary, tint: MeterPalette.blue)
                 QuotaRail(title: "Weekly", window: limits?.secondary, tint: MeterPalette.blue.opacity(0.55))
             }

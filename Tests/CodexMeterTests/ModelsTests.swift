@@ -63,8 +63,50 @@ final class ModelsTests: XCTestCase {
 
     func testRetriesTransientAppServerTransportErrors() {
         XCTAssertTrue(CodexAppServer.shouldRetry(CodexMeterError.server("error sending request for url")))
+        XCTAssertTrue(CodexAppServer.shouldRetry(CodexMeterError.server("failed to fetch codex rate limits")))
         XCTAssertTrue(CodexAppServer.shouldRetry(CodexMeterError.server("The network connection was lost")))
         XCTAssertFalse(CodexAppServer.shouldRetry(CodexMeterError.signedOut))
+    }
+
+    func testTransportErrorsUseANetworkFacingMessage() {
+        let message = CodexAppServer.userFacingMessage(for: CodexMeterError.server(
+            "failed to fetch codex rate limits: error sending request for url (https://chatgpt.com/backend-api/wham/usage)"
+        ))
+        XCTAssertTrue(message.contains("ChatGPT usage"))
+        XCTAssertTrue(message.contains("proxy") || message.contains("VPN"))
+        XCTAssertEqual(CodexAppServer.userFacingMessage(for: CodexMeterError.signedOut), CodexMeterError.signedOut.localizedDescription)
+    }
+
+    func testAugmentedPathIncludesHomebrewAndExecutableDirectory() {
+        let executable = URL(fileURLWithPath: "/opt/homebrew/bin/codex")
+        let path = CodexLaunchEnvironment.augmentedPath("/usr/bin:/bin", executable: executable)
+        XCTAssertTrue(path.contains("/opt/homebrew/bin"))
+        XCTAssertTrue(path.split(separator: ":").contains("/opt/homebrew/bin"))
+        XCTAssertTrue(path.contains("/usr/bin"))
+    }
+
+    func testMergeProxyDoesNotOverrideExistingValues() {
+        var environment = ["HTTPS_PROXY": "http://127.0.0.1:9"]
+        CodexLaunchEnvironment.merge(proxyVariables: ["HTTPS_PROXY": "http://example:8080", "HTTP_PROXY": "http://example:8080"], into: &environment)
+        XCTAssertEqual(environment["HTTPS_PROXY"], "http://127.0.0.1:9")
+        XCTAssertEqual(environment["HTTP_PROXY"], "http://example:8080")
+    }
+
+    func testResolvesNpmWrapperToNativeVendorBinary() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let wrapper = root.appendingPathComponent("bin/codex.js")
+        let native = root.appendingPathComponent("vendor/\(CodexLaunchEnvironment.currentTriple())/bin/codex")
+        try FileManager.default.createDirectory(at: wrapper.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: native.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("#!/usr/bin/env node\n".utf8).write(to: wrapper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapper.path)
+        try Data("native".utf8).write(to: native)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: native.path)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        XCTAssertEqual(CodexLaunchEnvironment.resolveNativeExecutable(wrapper), native)
+        XCTAssertTrue(CodexLaunchEnvironment.isShebangScript(wrapper))
+        XCTAssertFalse(CodexLaunchEnvironment.isShebangScript(native))
     }
 
     func testLiveOfficialAppServerWhenEnabled() throws {

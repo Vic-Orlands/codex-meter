@@ -10,7 +10,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "CodexMeter",
-            linkerSettings: [.linkedLibrary("sqlite3")]
+            linkerSettings: [
+                .linkedLibrary("sqlite3"),
+                .linkedFramework("SystemConfiguration"),
+            ]
         ),
         .testTarget(name: "CodexMeterTests", dependencies: ["CodexMeter"])
     ],
