@@ -81,9 +81,13 @@ struct MenuContentView: View {
         .frame(width: 410, height: 650)
         .onAppear {
             selectedID = selectedID ?? store.activeID ?? store.profiles.first?.id
+            store.refreshVisibleData(showingCursor: provider == .cursor)
         }
         .onChange(of: store.activeID) { _, id in
             if selectedID == nil { selectedID = id }
+        }
+        .onChange(of: provider) { _, newValue in
+            store.refreshVisibleData(showingCursor: newValue == .cursor)
         }
         .alert("Codex Meter", isPresented: Binding(
             get: { store.alertMessage != nil },
@@ -121,7 +125,7 @@ struct MenuContentView: View {
             Spacer()
             HStack(spacing: 3) {
                 Button {
-                    store.refresh()
+                    store.refreshAll(includeCursorActivity: provider == .cursor)
                 } label: {
                     ZStack {
                         Circle().fill(.primary.opacity(0.07))

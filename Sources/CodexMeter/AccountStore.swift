@@ -20,9 +20,14 @@ final class AccountStore: ObservableObject {
     private let appSupport: URL
     private let liveCodexHome: URL
     private let restartsCodexDesktopOnSwitch: Bool
-    private var refreshTask: Task<Void, Never>?
-    private var lastCursorActivityRefresh: Date?
     private var hasStarted = false
+    private var pendingRefreshRequest: RefreshRequest = []
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private var appObservers: [NSObjectProtocol] = []
+    private var lastCodexRefreshAttempt: Date?
+    private var lastCursorSummaryRefreshAttempt: Date?
+    private var lastCursorActivityRefreshAttempt: Date?
+    private var lastCursorActivityRefresh: Date?
     private var configURL: URL { appSupport.appendingPathComponent("accounts.json") }
 
     init(
@@ -47,105 +52,31 @@ final class AccountStore: ObservableObject {
         do {
             try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             if profiles.isEmpty { try importCurrentAccount() }
-            refresh()
-            refreshTask = Task { [weak self] in
-                while !Task.isCancelled {
-                    try? await Task.sleep(for: .seconds(60))
-                    self?.refresh()
-                }
-            }
+            installObservers()
+            refreshAll()
         } catch {
             alertMessage = error.localizedDescription
         }
     }
 
-    func refresh() {
-        guard !isRefreshing else { return }
-        if let active = activeID.flatMap({ id in profiles.first(where: { $0.id == id }) }) {
-            let liveAuth = liveCodexHome.appendingPathComponent("auth.json")
-            if fileManager.fileExists(atPath: liveAuth.path) {
-                try? atomicCopy(from: liveAuth, to: active.homeURL.appendingPathComponent("auth.json"))
+    func refreshAll(includeCursorActivity: Bool = false) {
+        enqueueRefresh([.codex, .cursorSummary, includeCursorActivity ? .cursorActivity : []])
+    }
+
+    func refreshVisibleData(showingCursor: Bool) {
+        var request: RefreshRequest = []
+        if shouldRefreshCodex() {
+            request.insert(.codex)
+        }
+        if showingCursor {
+            if shouldRefreshCursorSummary() {
+                request.insert(.cursorSummary)
+            }
+            if shouldRefreshCursorActivity() {
+                request.formUnion([.cursorSummary, .cursorActivity])
             }
         }
-        isRefreshing = true
-        let profilesToRefresh = profiles
-        let executable = CodexAppServer.locateExecutable(customPath: customCodexPath)
-        let includeCursorActivity = lastCursorActivityRefresh.map { Date().timeIntervalSince($0) >= 3600 } ?? true
-
-        Task.detached(priority: .userInitiated) {
-            await withTaskGroup(of: RefreshResult.self) { group in
-                group.addTask {
-                    var results: [UUID: Result<AccountSnapshot, Error>] = [:]
-                    for profile in profilesToRefresh {
-                        do {
-                            results[profile.id] = .success(try CodexAppServer.snapshot(codexHome: profile.homeURL, executable: executable))
-                        } catch {
-                            results[profile.id] = .failure(error)
-                        }
-                    }
-                    return .accounts(results)
-                }
-
-                group.addTask {
-                    do {
-                        return .cursor(.success(try await CursorUsageClient.snapshot(includeActivity: false)))
-                    } catch {
-                        return .cursor(.failure(error))
-                    }
-                }
-
-                for await result in group {
-                    switch result {
-                    case .accounts(let results):
-                        await MainActor.run {
-                            for (id, result) in results {
-                                switch result {
-                                case .success(let snapshot):
-                                    self.snapshots[id] = snapshot
-                                    self.accountErrors[id] = nil
-                                case .failure(let error):
-                                    self.accountErrors[id] = CodexAppServer.userFacingMessage(for: error)
-                                }
-                            }
-                            let allFailed = !results.isEmpty && results.values.allSatisfy { if case .failure = $0 { true } else { false } }
-                            if allFailed, self.snapshots.isEmpty,
-                               let first = results.values.first, case .failure(let error) = first {
-                                self.alertMessage = CodexAppServer.userFacingMessage(for: error)
-                            }
-                        }
-                    case .cursor(let result):
-                        switch result {
-                        case .success(let snapshot):
-                            await MainActor.run {
-                                var updated = snapshot
-                                if let existing = self.cursorSnapshot {
-                                    updated.dailyUsage = existing.dailyUsage
-                                    updated.totalTokens = existing.totalTokens
-                                }
-                                self.cursorSnapshot = updated
-                                self.cursorError = nil
-                            }
-                            if includeCursorActivity {
-                                await MainActor.run { self.lastCursorActivityRefresh = Date() }
-                                Task.detached(priority: .utility) {
-                                    guard let activity = try? await CursorUsageClient.activity() else { return }
-                                    await MainActor.run {
-                                        guard var current = self.cursorSnapshot else { return }
-                                        current.dailyUsage = activity.dailyUsage
-                                        current.totalTokens = activity.totalTokens
-                                        self.cursorSnapshot = current
-                                    }
-                                }
-                            }
-                        case .failure(let error):
-                            await MainActor.run { self.cursorError = error.localizedDescription }
-                        }
-                    }
-                }
-
-                await MainActor.run { self.isRefreshing = false }
-            }
-        }
+        enqueueRefresh(request)
     }
 
     func addAccount() {
@@ -225,6 +156,200 @@ final class AccountStore: ObservableObject {
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
     }
 
+    deinit {
+        workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        appObservers.forEach(NotificationCenter.default.removeObserver)
+    }
+
+    private func installObservers() {
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceObservers.append(
+            workspaceCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.refreshVisibleData(showingCursor: false)
+                }
+            }
+        )
+
+        appObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.refreshVisibleData(showingCursor: false)
+                }
+            }
+        )
+    }
+
+    private func enqueueRefresh(_ request: RefreshRequest) {
+        guard !request.isEmpty else { return }
+        pendingRefreshRequest.formUnion(request)
+        guard !isRefreshing else { return }
+        let nextRequest = pendingRefreshRequest
+        pendingRefreshRequest = []
+        runRefresh(nextRequest)
+    }
+
+    private func runRefresh(_ request: RefreshRequest) {
+        guard !request.isEmpty else { return }
+
+        if request.contains(.codex) {
+            syncActiveAuthIfNeeded()
+            lastCodexRefreshAttempt = Date()
+        }
+        if request.contains(.cursorSummary) {
+            lastCursorSummaryRefreshAttempt = Date()
+        }
+        if request.contains(.cursorActivity) {
+            lastCursorActivityRefreshAttempt = Date()
+        }
+
+        isRefreshing = true
+        let profilesToRefresh = request.contains(.codex) ? profiles : []
+        let executable = CodexAppServer.locateExecutable(customPath: customCodexPath)
+        let includeCursorSummary = request.contains(.cursorSummary)
+        let includeCursorActivity = request.contains(.cursorActivity)
+
+        Task.detached(priority: .userInitiated) {
+            await withTaskGroup(of: RefreshResult.self) { group in
+                if request.contains(.codex) {
+                    group.addTask {
+                        var results: [UUID: Result<AccountSnapshot, Error>] = [:]
+                        for profile in profilesToRefresh {
+                            do {
+                                results[profile.id] = .success(try CodexAppServer.snapshot(codexHome: profile.homeURL, executable: executable))
+                            } catch {
+                                results[profile.id] = .failure(error)
+                            }
+                        }
+                        return .accounts(results)
+                    }
+                }
+
+                if includeCursorSummary {
+                    group.addTask {
+                        do {
+                            return .cursor(.success(try await CursorUsageClient.snapshot(includeActivity: includeCursorActivity)), includeActivity: includeCursorActivity)
+                        } catch {
+                            return .cursor(.failure(error), includeActivity: includeCursorActivity)
+                        }
+                    }
+                }
+
+                for await result in group {
+                    switch result {
+                    case .accounts(let results):
+                        await MainActor.run {
+                            for (id, result) in results {
+                                switch result {
+                                case .success(let snapshot):
+                                    self.snapshots[id] = snapshot
+                                    self.accountErrors[id] = nil
+                                case .failure(let error):
+                                    self.accountErrors[id] = CodexAppServer.userFacingMessage(for: error)
+                                }
+                            }
+                            let allFailed = !results.isEmpty && results.values.allSatisfy { if case .failure = $0 { true } else { false } }
+                            if allFailed, self.snapshots.isEmpty,
+                               let first = results.values.first, case .failure(let error) = first {
+                                self.alertMessage = CodexAppServer.userFacingMessage(for: error)
+                            }
+                        }
+                    case .cursor(let result, let includeActivity):
+                        switch result {
+                        case .success(let snapshot):
+                            await MainActor.run {
+                                var updated = snapshot
+                                if !includeActivity, let existing = self.cursorSnapshot {
+                                    updated.dailyUsage = existing.dailyUsage
+                                    updated.totalTokens = existing.totalTokens
+                                }
+                                self.cursorSnapshot = updated
+                                self.cursorError = nil
+                                if includeActivity {
+                                    self.lastCursorActivityRefresh = Date()
+                                }
+                            }
+                        case .failure(let error):
+                            await MainActor.run { self.cursorError = error.localizedDescription }
+                        }
+                    }
+                }
+
+                await MainActor.run {
+                    self.isRefreshing = false
+                    if !self.pendingRefreshRequest.isEmpty {
+                        let nextRequest = self.pendingRefreshRequest
+                        self.pendingRefreshRequest = []
+                        self.runRefresh(nextRequest)
+                    }
+                }
+            }
+        }
+    }
+
+    private func shouldRefreshCodex(now: Date = Date()) -> Bool {
+        guard !profiles.isEmpty else { return false }
+        if snapshots.count < profiles.count || !accountErrors.isEmpty {
+            return retryEligible(lastCodexRefreshAttempt, now: now)
+        }
+        guard let lastFetch = snapshots.values.map(\.fetchedAt).max() else { return true }
+        return now.timeIntervalSince(lastFetch) >= 300
+    }
+
+    private func shouldRefreshCursorSummary(now: Date = Date()) -> Bool {
+        if cursorSnapshot == nil || cursorError != nil {
+            return retryEligible(lastCursorSummaryRefreshAttempt, now: now)
+        }
+        guard let fetchedAt = cursorSnapshot?.fetchedAt else { return true }
+        return now.timeIntervalSince(fetchedAt) >= 600
+    }
+
+    private func shouldRefreshCursorActivity(now: Date = Date()) -> Bool {
+        if cursorSnapshot?.dailyUsage.isEmpty != false {
+            return retryEligible(lastCursorActivityRefreshAttempt, now: now)
+        }
+        guard let lastCursorActivityRefresh else { return true }
+        return now.timeIntervalSince(lastCursorActivityRefresh) >= 3600
+    }
+
+    private func retryEligible(_ lastAttempt: Date?, now: Date, minimumInterval: TimeInterval = 60) -> Bool {
+        guard let lastAttempt else { return true }
+        return now.timeIntervalSince(lastAttempt) >= minimumInterval
+    }
+
+    private func syncActiveAuthIfNeeded() {
+        guard let active = activeID.flatMap({ id in profiles.first(where: { $0.id == id }) }) else { return }
+        let liveAuth = liveCodexHome.appendingPathComponent("auth.json")
+        let destination = active.homeURL.appendingPathComponent("auth.json")
+        guard fileManager.fileExists(atPath: liveAuth.path) else { return }
+        guard authNeedsSync(from: liveAuth, to: destination) else { return }
+        try? atomicCopy(from: liveAuth, to: destination)
+    }
+
+    private func authNeedsSync(from source: URL, to destination: URL) -> Bool {
+        guard fileManager.fileExists(atPath: destination.path) else { return true }
+        guard let sourceAttributes = try? fileManager.attributesOfItem(atPath: source.path),
+              let destinationAttributes = try? fileManager.attributesOfItem(atPath: destination.path) else {
+            return true
+        }
+        let sourceSize = sourceAttributes[.size] as? NSNumber
+        let destinationSize = destinationAttributes[.size] as? NSNumber
+        if sourceSize != destinationSize {
+            return true
+        }
+        let sourceModified = sourceAttributes[.modificationDate] as? Date
+        let destinationModified = destinationAttributes[.modificationDate] as? Date
+        return sourceModified != destinationModified
+    }
+
     private func restartCodexDesktop() {
         let bundleIdentifier = "com.openai.codex"
         guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else { return }
@@ -274,5 +399,13 @@ private struct AccountConfig: Codable {
 
 private enum RefreshResult {
     case accounts([UUID: Result<AccountSnapshot, Error>])
-    case cursor(Result<CursorSnapshot, Error>)
+    case cursor(Result<CursorSnapshot, Error>, includeActivity: Bool)
+}
+
+private struct RefreshRequest: OptionSet {
+    let rawValue: Int
+
+    static let codex = RefreshRequest(rawValue: 1 << 0)
+    static let cursorSummary = RefreshRequest(rawValue: 1 << 1)
+    static let cursorActivity = RefreshRequest(rawValue: 1 << 2)
 }
