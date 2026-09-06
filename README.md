@@ -22,7 +22,7 @@ Codex Meter brings the essential details from Codex and Cursor into a polished m
 - Keeps multiple Codex accounts organised and switches the desktop app to the selected account.
 - Shows Cursor plan usage, on-demand spending, token totals, and billing-cycle timing.
 - Presents token activity in a clear 16-week heatmap with daily, weekly, and cumulative views.
-- Refreshes usage automatically and provides a manual refresh whenever you need the latest figures.
+- Refreshes the active Codex percentage in the menu bar every minute and loads the fuller usage details when opened.
 - Includes a lightweight, dependency-free CLI for macOS and Linux.
 - Keeps credentials local, with no analytics, telemetry, or remote database.
 

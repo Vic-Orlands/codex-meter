@@ -2,6 +2,23 @@ import Foundation
 import SystemConfiguration
 
 enum CodexAppServer {
+    static func rateLimits(codexHome: URL, executable: URL? = nil) throws -> RateLimitsResponse {
+        var lastError: Error?
+        for attempt in 0..<2 {
+            do {
+                let session = try Session(codexHome: codexHome, executable: executable, timeout: 30)
+                defer { session.stop() }
+                try session.initialize()
+                return try session.requestRetrying("account/rateLimits/read")
+            } catch {
+                lastError = error
+                guard shouldRetry(error), attempt == 0 else { throw error }
+                Thread.sleep(forTimeInterval: 1.2)
+            }
+        }
+        throw lastError ?? CodexMeterError.invalidResponse
+    }
+
     static func snapshot(codexHome: URL, executable: URL? = nil) throws -> AccountSnapshot {
         var lastError: Error?
         for attempt in 0..<2 {

@@ -15,7 +15,6 @@ struct CodexMeterApp: App {
         MenuBarExtra {
             MenuContentView()
                 .environmentObject(store)
-                .task { store.start() }
         } label: {
             HStack(spacing: 4) {
                 Image(nsImage: AppIconRenderer.menuBarImage())
@@ -23,6 +22,7 @@ struct CodexMeterApp: App {
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
             }
             .accessibilityLabel("Codex Meter, \(menuTitle)")
+            .task { store.start() }
         }
         .menuBarExtraStyle(.window)
 

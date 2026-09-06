@@ -21,13 +21,11 @@ final class AccountStore: ObservableObject {
     private let liveCodexHome: URL
     private let restartsCodexDesktopOnSwitch: Bool
     private var hasStarted = false
+    private var refreshInProgress = false
     private var pendingRefreshRequest: RefreshRequest = []
+    private var menuBarRefreshTask: Task<Void, Never>?
     private var workspaceObservers: [NSObjectProtocol] = []
     private var appObservers: [NSObjectProtocol] = []
-    private var lastCodexRefreshAttempt: Date?
-    private var lastCursorSummaryRefreshAttempt: Date?
-    private var lastCursorActivityRefreshAttempt: Date?
-    private var lastCursorActivityRefresh: Date?
     private var configURL: URL { appSupport.appendingPathComponent("accounts.json") }
 
     init(
@@ -53,7 +51,8 @@ final class AccountStore: ObservableObject {
             try fileManager.createDirectory(at: appSupport, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             if profiles.isEmpty { try importCurrentAccount() }
             installObservers()
-            refreshAll()
+            refreshMenuBarUsage()
+            startMenuBarRefreshTimer()
         } catch {
             alertMessage = error.localizedDescription
         }
@@ -63,20 +62,17 @@ final class AccountStore: ObservableObject {
         enqueueRefresh([.codex, .cursorSummary, includeCursorActivity ? .cursorActivity : []])
     }
 
-    func refreshVisibleData(showingCursor: Bool) {
-        var request: RefreshRequest = []
-        if shouldRefreshCodex() {
-            request.insert(.codex)
-        }
+    func refreshExpandedData(showingCursor: Bool) {
         if showingCursor {
-            if shouldRefreshCursorSummary() {
-                request.insert(.cursorSummary)
-            }
-            if shouldRefreshCursorActivity() {
-                request.formUnion([.cursorSummary, .cursorActivity])
-            }
+            enqueueRefresh([.cursorSummary, .cursorActivity])
+        } else {
+            enqueueRefresh(.codex)
         }
-        enqueueRefresh(request)
+    }
+
+    func refreshMenuBarUsage() {
+        guard activeID != nil else { return }
+        enqueueRefresh(.activeCodexRateLimits)
     }
 
     func addAccount() {
@@ -119,6 +115,7 @@ final class AccountStore: ObservableObject {
             try atomicCopy(from: selectedAuth, to: liveAuth)
             activeID = profile.id
             save()
+            refreshMenuBarUsage()
             if restartsCodexDesktopOnSwitch { restartCodexDesktop() }
         } catch {
             alertMessage = error.localizedDescription
@@ -157,6 +154,7 @@ final class AccountStore: ObservableObject {
     }
 
     deinit {
+        menuBarRefreshTask?.cancel()
         workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
         appObservers.forEach(NotificationCenter.default.removeObserver)
     }
@@ -170,7 +168,7 @@ final class AccountStore: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.refreshVisibleData(showingCursor: false)
+                    self?.refreshMenuBarUsage()
                 }
             }
         )
@@ -182,16 +180,26 @@ final class AccountStore: ObservableObject {
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    self?.refreshVisibleData(showingCursor: false)
+                    self?.refreshMenuBarUsage()
                 }
             }
         )
     }
 
+    private func startMenuBarRefreshTimer() {
+        menuBarRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                guard !Task.isCancelled else { return }
+                self?.refreshMenuBarUsage()
+            }
+        }
+    }
+
     private func enqueueRefresh(_ request: RefreshRequest) {
         guard !request.isEmpty else { return }
         pendingRefreshRequest.formUnion(request)
-        guard !isRefreshing else { return }
+        guard !refreshInProgress else { return }
         let nextRequest = pendingRefreshRequest
         pendingRefreshRequest = []
         runRefresh(nextRequest)
@@ -200,36 +208,54 @@ final class AccountStore: ObservableObject {
     private func runRefresh(_ request: RefreshRequest) {
         guard !request.isEmpty else { return }
 
-        if request.contains(.codex) {
+        let refreshesExpandedData = request.contains(.codex) || request.contains(.cursorSummary)
+        let refreshesActiveRateLimits = request.contains(.activeCodexRateLimits) && !request.contains(.codex)
+
+        if request.contains(.codex) || refreshesActiveRateLimits {
             syncActiveAuthIfNeeded()
-            lastCodexRefreshAttempt = Date()
-        }
-        if request.contains(.cursorSummary) {
-            lastCursorSummaryRefreshAttempt = Date()
-        }
-        if request.contains(.cursorActivity) {
-            lastCursorActivityRefreshAttempt = Date()
         }
 
-        isRefreshing = true
+        refreshInProgress = true
+        isRefreshing = refreshesExpandedData
         let profilesToRefresh = request.contains(.codex) ? profiles : []
+        let activeProfile = refreshesActiveRateLimits
+            ? activeID.flatMap { id in profiles.first(where: { $0.id == id }) }
+            : nil
         let executable = CodexAppServer.locateExecutable(customPath: customCodexPath)
         let includeCursorSummary = request.contains(.cursorSummary)
         let includeCursorActivity = request.contains(.cursorActivity)
 
-        Task.detached(priority: .userInitiated) {
+        Task.detached(priority: refreshesExpandedData ? .userInitiated : .utility) {
             await withTaskGroup(of: RefreshResult.self) { group in
                 if request.contains(.codex) {
                     group.addTask {
-                        var results: [UUID: Result<AccountSnapshot, Error>] = [:]
-                        for profile in profilesToRefresh {
-                            do {
-                                results[profile.id] = .success(try CodexAppServer.snapshot(codexHome: profile.homeURL, executable: executable))
-                            } catch {
-                                results[profile.id] = .failure(error)
+                        await withTaskGroup(of: (UUID, Result<AccountSnapshot, Error>).self) { accountGroup in
+                            for profile in profilesToRefresh {
+                                accountGroup.addTask {
+                                    do {
+                                        return (profile.id, .success(try CodexAppServer.snapshot(codexHome: profile.homeURL, executable: executable)))
+                                    } catch {
+                                        return (profile.id, .failure(error))
+                                    }
+                                }
                             }
+                            var results: [UUID: Result<AccountSnapshot, Error>] = [:]
+                            for await (id, result) in accountGroup { results[id] = result }
+                            return .accounts(results)
                         }
-                        return .accounts(results)
+                    }
+                }
+
+                if let activeProfile {
+                    group.addTask {
+                        do {
+                            return .activeRateLimits(
+                                activeProfile.id,
+                                .success(try CodexAppServer.rateLimits(codexHome: activeProfile.homeURL, executable: executable))
+                            )
+                        } catch {
+                            return .activeRateLimits(activeProfile.id, .failure(error))
+                        }
                     }
                 }
 
@@ -262,6 +288,18 @@ final class AccountStore: ObservableObject {
                                 self.alertMessage = CodexAppServer.userFacingMessage(for: error)
                             }
                         }
+                    case .activeRateLimits(let id, let result):
+                        await MainActor.run {
+                            switch result {
+                            case .success(let response):
+                                var snapshot = self.snapshots[id] ?? AccountSnapshot()
+                                snapshot.apply(rateLimits: response)
+                                self.snapshots[id] = snapshot
+                                self.accountErrors[id] = nil
+                            case .failure(let error):
+                                self.accountErrors[id] = CodexAppServer.userFacingMessage(for: error)
+                            }
+                        }
                     case .cursor(let result, let includeActivity):
                         switch result {
                         case .success(let snapshot):
@@ -273,9 +311,6 @@ final class AccountStore: ObservableObject {
                                 }
                                 self.cursorSnapshot = updated
                                 self.cursorError = nil
-                                if includeActivity {
-                                    self.lastCursorActivityRefresh = Date()
-                                }
                             }
                         case .failure(let error):
                             await MainActor.run { self.cursorError = error.localizedDescription }
@@ -284,6 +319,7 @@ final class AccountStore: ObservableObject {
                 }
 
                 await MainActor.run {
+                    self.refreshInProgress = false
                     self.isRefreshing = false
                     if !self.pendingRefreshRequest.isEmpty {
                         let nextRequest = self.pendingRefreshRequest
@@ -293,36 +329,6 @@ final class AccountStore: ObservableObject {
                 }
             }
         }
-    }
-
-    private func shouldRefreshCodex(now: Date = Date()) -> Bool {
-        guard !profiles.isEmpty else { return false }
-        if snapshots.count < profiles.count || !accountErrors.isEmpty {
-            return retryEligible(lastCodexRefreshAttempt, now: now)
-        }
-        guard let lastFetch = snapshots.values.map(\.fetchedAt).max() else { return true }
-        return now.timeIntervalSince(lastFetch) >= 300
-    }
-
-    private func shouldRefreshCursorSummary(now: Date = Date()) -> Bool {
-        if cursorSnapshot == nil || cursorError != nil {
-            return retryEligible(lastCursorSummaryRefreshAttempt, now: now)
-        }
-        guard let fetchedAt = cursorSnapshot?.fetchedAt else { return true }
-        return now.timeIntervalSince(fetchedAt) >= 600
-    }
-
-    private func shouldRefreshCursorActivity(now: Date = Date()) -> Bool {
-        if cursorSnapshot?.dailyUsage.isEmpty != false {
-            return retryEligible(lastCursorActivityRefreshAttempt, now: now)
-        }
-        guard let lastCursorActivityRefresh else { return true }
-        return now.timeIntervalSince(lastCursorActivityRefresh) >= 3600
-    }
-
-    private func retryEligible(_ lastAttempt: Date?, now: Date, minimumInterval: TimeInterval = 60) -> Bool {
-        guard let lastAttempt else { return true }
-        return now.timeIntervalSince(lastAttempt) >= minimumInterval
     }
 
     private func syncActiveAuthIfNeeded() {
@@ -399,6 +405,7 @@ private struct AccountConfig: Codable {
 
 private enum RefreshResult {
     case accounts([UUID: Result<AccountSnapshot, Error>])
+    case activeRateLimits(UUID, Result<RateLimitsResponse, Error>)
     case cursor(Result<CursorSnapshot, Error>, includeActivity: Bool)
 }
 
@@ -408,4 +415,5 @@ private struct RefreshRequest: OptionSet {
     static let codex = RefreshRequest(rawValue: 1 << 0)
     static let cursorSummary = RefreshRequest(rawValue: 1 << 1)
     static let cursorActivity = RefreshRequest(rawValue: 1 << 2)
+    static let activeCodexRateLimits = RefreshRequest(rawValue: 1 << 3)
 }

@@ -18,6 +18,11 @@ struct AccountSnapshot: Equatable {
     var fetchedAt = Date()
 
     static let signedOut = AccountSnapshot()
+
+    mutating func apply(rateLimits response: RateLimitsResponse) {
+        rateLimits = response.rateLimits
+        resetCredits = response.rateLimitResetCredits?.availableCount
+    }
 }
 
 struct RateLimitsResponse: Decodable {

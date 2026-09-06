@@ -81,13 +81,13 @@ struct MenuContentView: View {
         .frame(width: 410, height: 650)
         .onAppear {
             selectedID = selectedID ?? store.activeID ?? store.profiles.first?.id
-            store.refreshVisibleData(showingCursor: provider == .cursor)
+            store.refreshExpandedData(showingCursor: provider == .cursor)
         }
         .onChange(of: store.activeID) { _, id in
             if selectedID == nil { selectedID = id }
         }
         .onChange(of: provider) { _, newValue in
-            store.refreshVisibleData(showingCursor: newValue == .cursor)
+            store.refreshExpandedData(showingCursor: newValue == .cursor)
         }
         .alert("Codex Meter", isPresented: Binding(
             get: { store.alertMessage != nil },

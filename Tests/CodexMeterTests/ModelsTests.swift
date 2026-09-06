@@ -49,6 +49,28 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(response.rateLimitResetCredits?.availableCount, 2)
     }
 
+    func testApplyingRateLimitsPreservesExpandedSnapshotData() throws {
+        let data = Data(#"{"rateLimits":{"primary":{"usedPercent":41,"windowDurationMins":300,"resetsAt":1900000000},"secondary":null,"credits":null,"individualLimit":null,"planType":"plus"},"rateLimitResetCredits":{"availableCount":3}}"#.utf8)
+        let response = try JSONDecoder().decode(RateLimitsResponse.self, from: data)
+        let fetchedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        var snapshot = AccountSnapshot(
+            email: "person@example.com",
+            planType: "plus",
+            usage: UsageSummary(lifetimeTokens: 12_000, currentStreakDays: 3, longestStreakDays: nil, peakDailyTokens: nil, longestRunningTurnSec: nil),
+            dailyUsage: [DailyUsageBucket(startDate: "2026-08-27", tokens: 4_200)],
+            fetchedAt: fetchedAt
+        )
+
+        snapshot.apply(rateLimits: response)
+
+        XCTAssertEqual(snapshot.rateLimits?.primary?.remainingPercent, 59)
+        XCTAssertEqual(snapshot.resetCredits, 3)
+        XCTAssertEqual(snapshot.email, "person@example.com")
+        XCTAssertEqual(snapshot.usage?.lifetimeTokens, 12_000)
+        XCTAssertEqual(snapshot.dailyUsage.first?.tokens, 4_200)
+        XCTAssertEqual(snapshot.fetchedAt, fetchedAt)
+    }
+
     func testDecodesDailyActivity() throws {
         let data = Data(#"{"summary":{"lifetimeTokens":12000,"currentStreakDays":3},"dailyUsageBuckets":[{"startDate":"2026-08-27","tokens":4200}]}"#.utf8)
         let response = try JSONDecoder().decode(UsageResponse.self, from: data)
