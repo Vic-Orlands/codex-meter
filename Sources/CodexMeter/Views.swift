@@ -9,6 +9,7 @@ private enum MeterPalette {
     static let fontSize: CGFloat = 13
     static let panelInset: CGFloat = 8
     static let panelFill = Color(red: 0.105, green: 0.105, blue: 0.11)
+    static let glassTint = NSColor(calibratedWhite: 0.08, alpha: 0.22)
 }
 
 private enum ProviderSelection: String, CaseIterable, Identifiable {
@@ -22,6 +23,7 @@ struct MenuContentView: View {
     @State private var selectedID: UUID?
     @State private var provider: ProviderSelection = .codex
     @State private var providerTransitionForward = true
+    @Namespace private var providerTabAnimation
 
     private var selectedProfile: AccountProfile? {
         let id = selectedID ?? store.activeID
@@ -161,31 +163,26 @@ struct MenuContentView: View {
     }
 
     private var providerPicker: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 0) {
             ForEach(ProviderSelection.allCases) { item in
-                Button {
+                ProviderTab(
+                    item: item,
+                    isSelected: provider == item,
+                    namespace: providerTabAnimation
+                ) {
                     guard provider != item else { return }
                     providerTransitionForward = item == .cursor
-                    withAnimation(.easeOut(duration: 0.16)) { provider = item }
-                } label: {
-                    HStack(spacing: 8) {
-                        ProviderProductIcon(product: item == .codex ? .codex : .cursor, size: 18)
-                        Text(item.rawValue)
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(provider == item ? Color.primary : Color.secondary)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous))
+                    withAnimation(.easeInOut(duration: 0.2)) { provider = item }
                 }
-                .buttonStyle(MeterPressStyle())
-                .meterSelectable(isSelected: provider == item)
             }
         }
+        .padding(2)
+        .background(
+            Color.primary.opacity(0.06),
+            in: RoundedRectangle(cornerRadius: MeterPalette.rowRadius + 2, style: .continuous)
+        )
         .padding(.horizontal, MeterPalette.panelInset)
-        .padding(.vertical, 4)
+        .padding(.vertical, 3)
     }
 
     private var accountStrip: some View {
@@ -759,8 +756,10 @@ private final class WindowTransparencyView: NSView {
         window.titlebarAppearsTransparent = true
         clip(window.contentView)
         clip(window.contentView?.superview)
-        neutralizeSystemGlass(window.contentView)
-        neutralizeSystemGlass(window.contentView?.superview)
+        clearOpaqueChrome(window.contentView)
+        clearOpaqueChrome(window.contentView?.superview)
+        styleSystemGlass(window.contentView)
+        styleSystemGlass(window.contentView?.superview)
         window.invalidateShadow()
         pin(window)
         DispatchQueue.main.async {
@@ -772,10 +771,9 @@ private final class WindowTransparencyView: NSView {
         guard let view else { return }
         view.wantsLayer = true
         view.layer?.mask = nil
-        view.layer?.cornerRadius = MeterPalette.radius
-        view.layer?.cornerCurve = .continuous
-        view.layer?.masksToBounds = true
+        view.layer?.masksToBounds = false
         view.layer?.backgroundColor = NSColor.clear.cgColor
+        view.layer?.isOpaque = false
     }
 
     private static func hidePopoverAnchor(of window: NSWindow) {
@@ -788,22 +786,36 @@ private final class WindowTransparencyView: NSView {
         }
     }
 
-    private static func neutralizeSystemGlass(_ root: NSView?) {
+    private static func clearOpaqueChrome(_ root: NSView?) {
         guard let root else { return }
         var stack = [root]
         while let view = stack.popLast() {
             stack.append(contentsOf: view.subviews)
-            let name = String(describing: type(of: view))
-            if name.contains("GlassEffect") {
-                view.layer?.mask = nil
-                view.layer?.cornerRadius = MeterPalette.radius
-                view.layer?.cornerCurve = .continuous
-                view.layer?.masksToBounds = true
-                if #available(macOS 26.0, *), let glass = view as? NSGlassEffectView {
-                    glass.cornerRadius = MeterPalette.radius
-                    glass.style = .clear
-                    glass.tintColor = NSColor(calibratedWhite: 0.11, alpha: 1)
-                }
+            view.wantsLayer = true
+            view.layer?.isOpaque = false
+            if view is NSVisualEffectView { continue }
+            view.layer?.backgroundColor = NSColor.clear.cgColor
+            if let clip = view as? NSClipView {
+                clip.drawsBackground = false
+                clip.backgroundColor = .clear
+            }
+            if let scroll = view as? NSScrollView {
+                scroll.drawsBackground = false
+                scroll.backgroundColor = .clear
+            }
+        }
+    }
+
+    private static func styleSystemGlass(_ root: NSView?) {
+        guard let root else { return }
+        var stack = [root]
+        while let view = stack.popLast() {
+            stack.append(contentsOf: view.subviews)
+            if #available(macOS 26.0, *), let glass = view as? NSGlassEffectView {
+                glass.layer?.mask = nil
+                glass.cornerRadius = MeterPalette.radius
+                glass.style = .clear
+                glass.tintColor = MeterPalette.glassTint
             }
         }
     }
@@ -853,17 +865,39 @@ private struct MeterPopoverChrome: ViewModifier {
         content
             .font(.system(size: MeterPalette.fontSize))
             .frame(width: 400, height: 640)
-            .background {
-                RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous)
-                    .fill(MeterPalette.panelFill)
-            }
-            .clipShape(RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous)
-                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.6)
+                    .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.6)
             }
             .preferredColorScheme(.dark)
+            .modifier(MeterWindowGlass())
             .background(WindowTransparency())
+    }
+}
+
+private struct MeterWindowGlass: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.containerBackground(for: .window) {
+                MeterGlassFill()
+            }
+        } else {
+            content.background { MeterGlassFill() }
+        }
+    }
+}
+
+private struct MeterGlassFill: View {
+    var body: some View {
+        if #available(macOS 26.0, *) {
+            Color.clear
+                .glassEffect(
+                    .clear.tint(Color.black.opacity(0.22)),
+                    in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous)
+                )
+        } else {
+            Rectangle().fill(.ultraThinMaterial)
+        }
     }
 }
 
@@ -873,6 +907,41 @@ private struct MeterInsetDivider: View {
             .fill(.primary.opacity(0.1))
             .frame(height: 0.5)
             .padding(.horizontal, 12)
+    }
+}
+
+private struct ProviderTab: View {
+    let item: ProviderSelection
+    let isSelected: Bool
+    let namespace: Namespace.ID
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                ProviderProductIcon(product: item == .codex ? .codex : .cursor, size: 13)
+                Text(item.rawValue)
+                    .font(.system(size: 12, weight: .medium))
+            }
+            .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 3)
+            .contentShape(RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous))
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous)
+                        .fill(Color.primary.opacity(0.12))
+                        .matchedGeometryEffect(id: "provider-tab", in: namespace)
+                } else if hovering {
+                    RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous)
+                        .fill(Color.primary.opacity(0.07))
+                }
+            }
+        }
+        .buttonStyle(MeterPressStyle())
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: hovering)
     }
 }
 
