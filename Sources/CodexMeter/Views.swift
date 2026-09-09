@@ -2,10 +2,13 @@ import AppKit
 import SwiftUI
 
 private enum MeterPalette {
-    static let blue = Color(red: 0.31, green: 0.62, blue: 1.0)
-    static let card = Color(nsColor: .controlBackgroundColor).opacity(0.72)
-    static let radius: CGFloat = 8
-    static let fontSize: CGFloat = 11
+    static let accent = Color.accentColor
+    static let radius: CGFloat = 18
+    static let rowRadius: CGFloat = 8
+    static let chipRadius: CGFloat = 8
+    static let fontSize: CGFloat = 13
+    static let panelInset: CGFloat = 8
+    static let panelFill = Color(red: 0.105, green: 0.105, blue: 0.11)
 }
 
 private enum ProviderSelection: String, CaseIterable, Identifiable {
@@ -16,12 +19,9 @@ private enum ProviderSelection: String, CaseIterable, Identifiable {
 
 struct MenuContentView: View {
     @EnvironmentObject private var store: AccountStore
-    @Environment(\.colorScheme) private var colorScheme
     @State private var selectedID: UUID?
     @State private var provider: ProviderSelection = .codex
     @State private var providerTransitionForward = true
-    @Namespace private var providerTabAnimation
-    @Namespace private var accountTabAnimation
 
     private var selectedProfile: AccountProfile? {
         let id = selectedID ?? store.activeID
@@ -33,229 +33,200 @@ struct MenuContentView: View {
     }
 
     var body: some View {
-        ZStack {
-            background
-            VStack(spacing: 0) {
-                header
-                providerPicker
+        panel
+            .modifier(MeterPopoverChrome())
+            .onAppear(perform: handleAppear)
+            .onChange(of: store.activeID) { _, id in
+                if selectedID == nil { selectedID = id }
+            }
+            .onChange(of: provider) { _, newValue in
+                store.refreshExpandedData(showingCursor: newValue == .cursor)
+            }
+            .alert("Codex Meter", isPresented: Binding(
+                get: { store.alertMessage != nil },
+                set: { if !$0 { store.alertMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(store.alertMessage ?? "")
+            }
+    }
 
-                Group {
-                    switch provider {
-                    case .codex:
-                        if store.profiles.isEmpty {
-                            emptyState
-                        } else {
-                            ScrollView(showsIndicators: false) {
-                                VStack(spacing: 12) {
-                                    if let profile = selectedProfile {
-                                        accountPanel(profile: profile)
-                                        quickStats
-                                        TokenActivityCard(dailyUsage: selectedSnapshot?.dailyUsage ?? [])
-                                        actions
-                                    }
-                                }
-                                .padding(.horizontal, 14)
-                                .padding(.bottom, 14)
-                            }
-                        }
-                    case .cursor:
-                        ScrollView(showsIndicators: false) {
-                            CursorProviderView(
-                                snapshot: store.cursorSnapshot,
-                                error: store.cursorError,
-                                isRefreshing: store.isRefreshing
-                            )
-                            .padding(.horizontal, 14)
-                            .padding(.bottom, 14)
-                        }
-                    }
-                }
+    private func handleAppear() {
+        selectedID = selectedID ?? store.activeID ?? store.profiles.first?.id
+        store.refreshExpandedData(showingCursor: provider == .cursor)
+        WindowTransparencyView.pinOpenWindows()
+        DispatchQueue.main.async {
+            WindowTransparencyView.pinOpenWindows()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            WindowTransparencyView.pinOpenWindows()
+        }
+    }
+
+    private var panel: some View {
+        VStack(spacing: 0) {
+            header
+            MeterInsetDivider()
+            providerPicker
+            MeterInsetDivider()
+            providerBody
                 .id(provider)
                 .transition(.asymmetric(
                     insertion: .move(edge: providerTransitionForward ? .trailing : .leading).combined(with: .opacity),
                     removal: .move(edge: providerTransitionForward ? .leading : .trailing).combined(with: .opacity)
                 ))
-            }
-        }
-        .font(.system(size: MeterPalette.fontSize))
-        .frame(width: 410, height: 650)
-        .onAppear {
-            selectedID = selectedID ?? store.activeID ?? store.profiles.first?.id
-            store.refreshExpandedData(showingCursor: provider == .cursor)
-        }
-        .onChange(of: store.activeID) { _, id in
-            if selectedID == nil { selectedID = id }
-        }
-        .onChange(of: provider) { _, newValue in
-            store.refreshExpandedData(showingCursor: newValue == .cursor)
-        }
-        .alert("Codex Meter", isPresented: Binding(
-            get: { store.alertMessage != nil },
-            set: { if !$0 { store.alertMessage = nil } }
-        )) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text(store.alertMessage ?? "")
         }
     }
 
-    private var background: some View {
-        (colorScheme == .dark ? Color.black : Color.white)
-        .ignoresSafeArea()
+    @ViewBuilder
+    private var providerBody: some View {
+        switch provider {
+        case .codex:
+            if store.profiles.isEmpty {
+                emptyState
+            } else {
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 10) {
+                        if let profile = selectedProfile {
+                            accountPanel(profile: profile)
+                            quickStats
+                            TokenActivityCard(dailyUsage: selectedSnapshot?.dailyUsage ?? [])
+                            actions
+                        }
+                    }
+                    .padding(.horizontal, MeterPalette.panelInset)
+                    .padding(.top, 8)
+                    .padding(.bottom, 10)
+                }
+                .scrollContentBackground(.hidden)
+            }
+        case .cursor:
+            ScrollView(showsIndicators: false) {
+                CursorProviderView(
+                    snapshot: store.cursorSnapshot,
+                    error: store.cursorError,
+                    isRefreshing: store.isRefreshing
+                )
+                .padding(.horizontal, MeterPalette.panelInset)
+                .padding(.top, 8)
+                .padding(.bottom, 10)
+            }
+            .scrollContentBackground(.hidden)
+        }
     }
 
     private var header: some View {
-        HStack(spacing: 11) {
-            SwitchLogo(size: 28, color: MeterPalette.blue)
+        HStack(spacing: 10) {
+            SwitchLogo(size: 22, color: MeterPalette.accent)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Codex Meter")
-                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .font(.system(size: 13, weight: .semibold))
                 TimelineView(.periodic(from: .now, by: 30)) { _ in
                     if let fetchedAt = provider == .codex ? selectedSnapshot?.fetchedAt : store.cursorSnapshot?.fetchedAt {
                         Text("Updated \(fetchedAt, style: .relative)")
-                        .font(.system(size: 10, weight: .medium))
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
                         Text(store.isRefreshing ? "Reading usage…" : "Local account monitor")
-                            .font(.system(size: 10, weight: .medium))
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-            Spacer()
-            HStack(spacing: 3) {
-                Button {
+            Spacer(minLength: 8)
+            HStack(spacing: 2) {
+                MeterToolbarButton(symbol: store.isRefreshing ? nil : "arrow.clockwise", help: "Refresh usage", disabled: store.isRefreshing) {
                     store.refreshAll(includeCursorActivity: provider == .cursor)
                 } label: {
-                    ZStack {
-                        Circle().fill(.primary.opacity(0.07))
-                        if store.isRefreshing {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 12, weight: .semibold))
-                        }
+                    if store.isRefreshing {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
                     }
-                    .frame(width: 28, height: 28)
                 }
-                .buttonStyle(.plain)
-                .disabled(store.isRefreshing)
-                .help("Refresh usage")
                 SettingsLink {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                        .background(.primary.opacity(0.07), in: Circle())
                 }
-                .buttonStyle(.plain)
+                .meterToolbarChrome()
                 .help("Settings")
-                Button {
+                MeterToolbarButton(symbol: "power", help: "Quit Codex Meter") {
                     NSApplication.shared.terminate(nil)
-                } label: {
-                    Image(systemName: "power")
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(width: 28, height: 28)
-                        .background(.primary.opacity(0.07), in: Circle())
                 }
-                .buttonStyle(.plain)
-                .help("Quit Codex Meter")
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 12)
-        .padding(.bottom, 9)
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
     }
 
     private var providerPicker: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: 4) {
             ForEach(ProviderSelection.allCases) { item in
                 Button {
                     guard provider != item else { return }
                     providerTransitionForward = item == .cursor
-                    withAnimation(.easeInOut(duration: 0.24)) { provider = item }
+                    withAnimation(.easeOut(duration: 0.16)) { provider = item }
                 } label: {
-                    HStack(spacing: 7) {
-                        if item == .codex {
-                            ProviderProductIcon(product: .codex, size: 19)
-                        } else {
-                            ProviderProductIcon(product: .cursor, size: 19)
-                        }
+                    HStack(spacing: 8) {
+                        ProviderProductIcon(product: item == .codex ? .codex : .cursor, size: 18)
                         Text(item.rawValue)
-                            .font(.system(size: MeterPalette.fontSize, weight: .semibold))
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(provider == item ? Color.primary : Color.secondary)
+                        Spacer(minLength: 0)
                     }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 7)
-                    .contentShape(Rectangle())
-                    .foregroundStyle(provider == item ? Color.primary : Color.secondary)
-                    .background {
-                        if provider == item {
-                            RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous)
-                                .fill(Color.primary.opacity(0.08))
-                                .matchedGeometryEffect(id: "provider-tab", in: providerTabAnimation)
-                        }
-                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(MeterPressStyle())
+                .meterSelectable(isSelected: provider == item)
             }
         }
-        .padding(3)
-        .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
-        .padding(.horizontal, 14)
-        .padding(.bottom, 10)
+        .padding(.horizontal, MeterPalette.panelInset)
+        .padding(.vertical, 4)
     }
 
     private var accountStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(alignment: .bottom, spacing: 3) {
+            HStack(spacing: 4) {
                 ForEach(store.profiles) { profile in
                     let isSelected = selectedProfile?.id == profile.id
                     Button {
-                        withAnimation(.easeOut(duration: 0.18)) { selectedID = profile.id }
+                        withAnimation(.easeOut(duration: 0.16)) { selectedID = profile.id }
                     } label: {
                         Text(shortName(profile))
-                            .font(.system(size: MeterPalette.fontSize, weight: .semibold))
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(isSelected ? Color.primary : Color.secondary)
                             .lineLimit(1)
                             .truncationMode(.tail)
-                            .frame(maxWidth: 96)
                             .padding(.horizontal, 11)
-                            .padding(.vertical, 8)
-                            .contentShape(Rectangle())
-                            .background {
-                                UnevenRoundedRectangle(
-                                    topLeadingRadius: MeterPalette.radius,
-                                    bottomLeadingRadius: 0,
-                                    bottomTrailingRadius: 0,
-                                    topTrailingRadius: MeterPalette.radius,
-                                    style: .continuous
-                                )
-                                .fill(isSelected ? MeterPalette.card : Color.primary.opacity(0.045))
-                                .matchedGeometryEffect(id: isSelected ? "account-tab" : profile.id.uuidString, in: accountTabAnimation)
-                            }
-                            .opacity(isSelected ? 1 : 0.58)
-                            .offset(y: isSelected ? 1 : 0)
+                            .padding(.vertical, 6)
+                            .contentShape(Capsule())
                     }
-                    .buttonStyle(.plain)
-                    .zIndex(isSelected ? 2 : 0)
+                    .buttonStyle(MeterPressStyle())
+                    .meterSelectable(isSelected: isSelected, shape: Capsule())
                 }
 
                 Button { store.addAccount() } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: MeterPalette.fontSize, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                         .frame(width: 28, height: 28)
-                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
+                        .contentShape(Circle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(MeterPressStyle())
+                .meterSelectable(isSelected: false, shape: Circle())
                 .disabled(store.isRefreshing)
                 .help("Add account")
             }
+            .padding(2)
         }
-        .frame(height: 30)
     }
 
     private func accountPanel(profile: AccountProfile) -> some View {
-        VStack(alignment: .leading, spacing: -1) {
-            accountStrip.zIndex(2)
+        VStack(alignment: .leading, spacing: 8) {
+            accountStrip
             accountHero(profile: profile)
                 .id(profile.id)
                 .transition(.opacity)
@@ -266,109 +237,94 @@ struct MenuContentView: View {
         let snapshot = selectedSnapshot
         let limits = snapshot?.rateLimits
 
-        return VStack(spacing: 14) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
+        return VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center, spacing: 8) {
+                    ProviderProductIcon(product: .codex, size: 18)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(profile.name)
-                            .font(.system(size: MeterPalette.fontSize, weight: .semibold))
+                            .font(.system(size: 13, weight: .semibold))
                             .lineLimit(1)
                         Text(snapshot?.email ?? "Waiting for account details")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                     Spacer()
-                    if let plan = snapshot?.planType {
-                        Text(plan.uppercased())
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(MeterPalette.blue)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(MeterPalette.blue.opacity(0.12), in: Capsule())
-                    }
+                if let plan = snapshot?.planType {
+                    Text(plan.uppercased())
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(MeterPalette.accent)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(MeterPalette.accent.opacity(0.14), in: Capsule())
                 }
-
-                if let error = store.accountErrors[profile.id] {
-                    Text(error)
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                QuotaRail(title: "5-hour", window: limits?.primary, tint: MeterPalette.blue)
-                QuotaRail(title: "Weekly", window: limits?.secondary, tint: MeterPalette.blue.opacity(0.55))
             }
+
+            if let error = store.accountErrors[profile.id] {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            QuotaRail(title: "5-hour", window: limits?.primary)
+            QuotaRail(title: "Weekly", window: limits?.secondary, dimmed: true)
 
             if store.activeID != profile.id {
-                Button {
+                MeterMenuRow(title: "Use this account", symbol: "arrow.triangle.swap") {
                     store.switchAccount(to: profile)
-                } label: {
-                    Label("Use this account", systemImage: "arrow.triangle.swap")
-                        .font(.subheadline.weight(.semibold))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white)
-                .background(MeterPalette.blue, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity)
-        .background(
-            MeterPalette.card,
-            in: UnevenRoundedRectangle(
-                topLeadingRadius: 0,
-                bottomLeadingRadius: MeterPalette.radius,
-                bottomTrailingRadius: MeterPalette.radius,
-                topTrailingRadius: MeterPalette.radius,
-                style: .continuous
-            )
-        )
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .meterCard()
     }
 
     private var quickStats: some View {
         HStack(spacing: 8) {
-            StatPill(title: "Credits", value: creditLabel, symbol: "creditcard.fill", tint: MeterPalette.blue)
-            StatPill(title: "Lifetime", value: tokenLabel(selectedSnapshot?.usage?.lifetimeTokens), symbol: "text.word.spacing", tint: MeterPalette.blue)
-            StatPill(title: "Streak", value: streakLabel, symbol: "flame.fill", tint: MeterPalette.blue)
+            StatPill(title: "Credits", value: creditLabel, symbol: "creditcard")
+            StatPill(title: "Lifetime", value: tokenLabel(selectedSnapshot?.usage?.lifetimeTokens), symbol: "text.word.spacing")
+            StatPill(title: "Streak", value: streakLabel, symbol: "flame")
         }
     }
 
     private var actions: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                ActionTile(title: "Add account", symbol: "person.badge.plus") { store.addAccount() }
-                ActionTile(title: "Open status", symbol: "waveform.path.ecg") {
-                    NSWorkspace.shared.open(URL(string: "https://status.openai.com")!)
-                }
+        VStack(spacing: 2) {
+            MeterMenuRow(title: "Add account", symbol: "person.badge.plus", disabled: store.isRefreshing) {
+                store.addAccount()
             }
-            HStack(spacing: 6) {
-                Image(systemName: "lock.shield.fill")
+            MeterMenuRow(title: "Open status", symbol: "waveform.path.ecg") {
+                NSWorkspace.shared.open(URL(string: "https://status.openai.com")!)
+            }
+            MeterInsetDivider()
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield")
                 Text("Credentials stay on this Mac")
                 Spacer()
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 4)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
         }
     }
 
     private var emptyState: some View {
-        VStack(spacing: 14) {
-            SwitchLogo(size: 48, color: MeterPalette.blue)
+        VStack(spacing: 12) {
+            SwitchLogo(size: 44, color: MeterPalette.accent)
             Text("Connect your first account")
-                .font(.system(size: 16, weight: .semibold, design: .rounded))
+                .font(.system(size: 15, weight: .semibold))
             Text("Sign-in opens in your browser and stays with the official Codex CLI.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-                .frame(maxWidth: 290)
+                .frame(maxWidth: 280)
             Button("Add account") { store.addAccount() }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .controlSize(.regular)
         }
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(.vertical, 48)
     }
 
@@ -396,35 +352,39 @@ struct MenuContentView: View {
 private struct QuotaRail: View {
     let title: String
     let window: RateLimitWindow?
-    let tint: Color
+    var dimmed = false
 
     var body: some View {
         VStack(spacing: 5) {
             HStack {
-                Text(title).font(.caption.weight(.semibold))
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Text("\(window?.usedPercent ?? 0)% used")
                     .font(.caption.monospacedDigit().weight(.medium))
             }
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.075))
+                    Capsule().fill(.primary.opacity(0.08))
                     Capsule()
-                        .fill(tint)
+                        .fill(MeterPalette.accent.opacity(dimmed ? 0.55 : 1))
                         .frame(width: proxy.size.width * CGFloat(max(0, min(100, window?.usedPercent ?? 0))) / 100)
                 }
             }
-            .frame(height: 6)
+            .frame(height: 5)
             HStack {
                 Spacer()
                 if let reset = window?.resetDate {
                     TimelineView(.periodic(from: .now, by: 60)) { _ in
                         Text("Resets \(reset, style: .relative)")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
                 } else {
-                    Text("Reset unavailable").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text("Reset unavailable")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
             }
         }
@@ -438,76 +398,82 @@ private struct CursorProviderView: View {
 
     var body: some View {
         VStack(spacing: 12) {
-            VStack(spacing: 14) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .firstTextBaseline) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Cursor")
-                                .font(.system(size: MeterPalette.fontSize, weight: .semibold))
-                            Text(snapshot?.email ?? cursorStatus)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                        }
-                        Spacer()
-                        if let membership = snapshot?.membershipType {
-                            Text(planName(membership).uppercased())
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(MeterPalette.blue)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 4)
-                                .background(MeterPalette.blue.opacity(0.1), in: Capsule())
-                            }
-                        }
-
-                    CursorRail(title: "Auto", percent: snapshot?.autoPercentUsed, tint: MeterPalette.blue)
-                    CursorRail(title: "Models", percent: snapshot?.apiPercentUsed, tint: MeterPalette.blue.opacity(0.55))
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center, spacing: 8) {
+                    ProviderProductIcon(product: .cursor, size: 18)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Cursor")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(snapshot?.email ?? cursorStatus)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    if let membership = snapshot?.membershipType {
+                        Text(planName(membership).uppercased())
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(MeterPalette.accent)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(MeterPalette.accent.opacity(0.14), in: Capsule())
+                    }
                 }
+
+                CursorRail(title: "Auto", percent: snapshot?.autoPercentUsed)
+                CursorRail(title: "Models", percent: snapshot?.apiPercentUsed, dimmed: true)
 
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Included usage").font(.caption).foregroundStyle(.secondary)
+                        Text("Included usage")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                         Text(includedUsage)
                             .font(.subheadline.monospacedDigit().weight(.semibold))
                     }
                     Spacer()
                     if let reset = snapshot?.billingCycleEnd {
                         VStack(alignment: .trailing, spacing: 2) {
-                            Text("Cycle resets").font(.caption).foregroundStyle(.secondary)
+                            Text("Cycle resets")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                             Text(reset, format: .dateTime.month(.abbreviated).day())
                                 .font(.subheadline.weight(.semibold))
                         }
                     }
                 }
             }
-            .padding(12)
-            .background(MeterPalette.card, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
+            .padding(10)
+            .meterCard()
 
             HStack(spacing: 8) {
-                StatPill(title: "Tokens", value: compact(snapshot?.totalTokens), symbol: "text.word.spacing", tint: MeterPalette.blue)
-                StatPill(title: "On demand", value: money(snapshot?.onDemandUsedCents), symbol: "bolt.fill", tint: MeterPalette.blue)
-                StatPill(title: "Plan left", value: "\(Int((100 - (snapshot?.planPercentUsed ?? 0)).rounded()))%", symbol: "gauge.with.dots.needle.50percent", tint: MeterPalette.blue)
+                StatPill(title: "Tokens", value: compact(snapshot?.totalTokens), symbol: "text.word.spacing")
+                StatPill(title: "On demand", value: money(snapshot?.onDemandUsedCents), symbol: "bolt")
+                StatPill(title: "Plan left", value: "\(Int((100 - (snapshot?.planPercentUsed ?? 0)).rounded()))%", symbol: "gauge.with.dots.needle.50percent")
             }
 
             TokenActivityCard(dailyUsage: snapshot?.dailyUsage ?? [])
 
-            HStack(spacing: 8) {
-                ActionTile(title: "Dashboard", symbol: "chart.bar.xaxis") {
+            VStack(spacing: 2) {
+                MeterMenuRow(title: "Dashboard", symbol: "chart.bar.xaxis") {
                     NSWorkspace.shared.open(URL(string: "https://cursor.com/dashboard?tab=usage")!)
                 }
-                ActionTile(title: "Cursor status", symbol: "waveform.path.ecg") {
+                MeterMenuRow(title: "Cursor status", symbol: "waveform.path.ecg") {
                     NSWorkspace.shared.open(URL(string: "https://status.cursor.com")!)
                 }
             }
 
-            HStack(spacing: 6) {
-                Image(systemName: "lock.shield.fill")
+            HStack(spacing: 8) {
+                Image(systemName: "lock.shield")
                 Text("Reads Cursor’s session in memory · never stored")
                 Spacer()
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 4)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
         }
+        .padding(.top, 4)
     }
 
     private var cursorStatus: String {
@@ -542,24 +508,28 @@ private struct CursorProviderView: View {
 private struct CursorRail: View {
     let title: String
     let percent: Double?
-    let tint: Color
+    var dimmed = false
 
     var body: some View {
         let used = max(0, min(100, percent ?? 0))
         VStack(spacing: 5) {
             HStack {
-                Text(title).font(.caption.weight(.semibold))
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Text(percent == nil ? "—" : "\(Int(used.rounded()))% used")
                     .font(.caption.monospacedDigit().weight(.medium))
             }
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.075))
-                    Capsule().fill(tint).frame(width: proxy.size.width * used / 100)
+                    Capsule().fill(.primary.opacity(0.08))
+                    Capsule()
+                        .fill(MeterPalette.accent.opacity(dimmed ? 0.55 : 1))
+                        .frame(width: proxy.size.width * used / 100)
                 }
             }
-            .frame(height: 6)
+            .frame(height: 5)
         }
     }
 }
@@ -568,24 +538,28 @@ private struct StatPill: View {
     let title: String
     let value: String
     let symbol: String
-    let tint: Color
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 8) {
             Image(systemName: symbol)
                 .font(.caption)
-                .foregroundStyle(tint)
-                .frame(width: 22, height: 22)
-                .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
-            VStack(alignment: .leading, spacing: 0) {
-                Text(title).font(.system(size: 9, weight: .medium)).foregroundStyle(.secondary)
-                Text(value).font(.caption.monospacedDigit().weight(.semibold)).lineLimit(1)
+                .foregroundStyle(MeterPalette.accent)
+                .frame(width: 24, height: 24)
+                .background(MeterPalette.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
-        .padding(9)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
         .frame(maxWidth: .infinity)
-        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
+        .background(.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
@@ -604,11 +578,11 @@ private struct TokenActivityCard: View {
     private let weeks = 16
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text("Token activity")
-                        .font(.system(size: MeterPalette.fontSize, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                     Text(activitySubtitle)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -619,9 +593,8 @@ private struct TokenActivityCard: View {
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
-                .font(.system(size: 10, weight: .medium))
                 .controlSize(.small)
-                .frame(width: 155)
+                .frame(width: 168)
             }
 
             let values = activityValues
@@ -629,7 +602,7 @@ private struct TokenActivityCard: View {
             GeometryReader { proxy in
                 let spacing: CGFloat = 3
                 let columns = CGFloat(weeks)
-                let cellWidth = (proxy.size.width - spacing * (columns - 1)) / columns
+                let cellWidth = max(2, (proxy.size.width - spacing * (columns - 1)) / columns)
                 let rows = Array(repeating: GridItem(.fixed(8), spacing: spacing), count: 7)
                 LazyHGrid(rows: rows, spacing: spacing) {
                     ForEach(Array(values.enumerated()), id: \.offset) { _, value in
@@ -642,7 +615,7 @@ private struct TokenActivityCard: View {
             }
             .frame(height: 74)
             .padding(8)
-            .background(MeterPalette.card, in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
+            .background(.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: MeterPalette.chipRadius, style: .continuous))
             .animation(.easeOut(duration: 0.2), value: mode)
 
             HStack {
@@ -650,9 +623,11 @@ private struct TokenActivityCard: View {
                     Text(monthLabels[index]).frame(maxWidth: .infinity, alignment: index == 0 ? .leading : (index == monthLabels.count - 1 ? .trailing : .center))
                 }
             }
-            .font(.system(size: 9, weight: .medium))
+            .font(.caption2)
             .foregroundStyle(.tertiary)
         }
+        .padding(10)
+        .meterCard()
     }
 
     private var dates: [Date] {
@@ -698,38 +673,12 @@ private struct TokenActivityCard: View {
     }
 
     private func activityColor(value: Int, maximum: Int) -> Color {
-        guard value > 0 else { return Color.primary.opacity(0.055) }
+        guard value > 0 else { return Color.primary.opacity(0.16) }
         let intensity = Double(value) / Double(maximum)
-        if intensity > 0.74 { return MeterPalette.blue }
-        if intensity > 0.42 { return MeterPalette.blue.opacity(0.72) }
-        if intensity > 0.16 { return MeterPalette.blue.opacity(0.42) }
-        return MeterPalette.blue.opacity(0.2)
-    }
-}
-
-private struct ActionTile: View {
-    let title: String
-    let symbol: String
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) { ActionTileLabel(title: title, symbol: symbol) }
-            .buttonStyle(.plain)
-    }
-}
-
-private struct ActionTileLabel: View {
-    let title: String
-    let symbol: String
-
-    var body: some View {
-        VStack(spacing: 6) {
-            Image(systemName: symbol).font(.system(size: 14, weight: .semibold))
-            Text(title).font(.system(size: 10, weight: .medium)).lineLimit(1)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 10)
-        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
+        if intensity > 0.74 { return MeterPalette.accent }
+        if intensity > 0.42 { return MeterPalette.accent.opacity(0.72) }
+        if intensity > 0.16 { return MeterPalette.accent.opacity(0.42) }
+        return MeterPalette.accent.opacity(0.2)
     }
 }
 
@@ -760,5 +709,296 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 480, height: 330)
         .padding()
+    }
+}
+
+private final class WindowTransparencyView: NSView {
+    private var moveObserver: NSObjectProtocol?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        configure()
+        observeWindow()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        configure()
+    }
+
+    deinit {
+        if let moveObserver {
+            NotificationCenter.default.removeObserver(moveObserver)
+        }
+    }
+
+    private func observeWindow() {
+        if let moveObserver {
+            NotificationCenter.default.removeObserver(moveObserver)
+        }
+        guard let window else { return }
+        moveObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didMoveNotification,
+            object: window,
+            queue: .main
+        ) { _ in
+            WindowTransparencyView.pin(window)
+        }
+    }
+
+    private func configure() {
+        guard let window else { return }
+        WindowTransparencyView.style(window)
+    }
+
+    static func style(_ window: NSWindow) {
+        hidePopoverAnchor(of: window)
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.titlebarAppearsTransparent = true
+        clip(window.contentView)
+        clip(window.contentView?.superview)
+        neutralizeSystemGlass(window.contentView)
+        neutralizeSystemGlass(window.contentView?.superview)
+        window.invalidateShadow()
+        pin(window)
+        DispatchQueue.main.async {
+            pin(window)
+        }
+    }
+
+    private static func clip(_ view: NSView?) {
+        guard let view else { return }
+        view.wantsLayer = true
+        view.layer?.mask = nil
+        view.layer?.cornerRadius = MeterPalette.radius
+        view.layer?.cornerCurve = .continuous
+        view.layer?.masksToBounds = true
+        view.layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    private static func hidePopoverAnchor(of window: NSWindow) {
+        var responder: NSResponder? = window
+        while let node = responder {
+            if node.responds(to: NSSelectorFromString("setShouldHideAnchor:")) {
+                node.setValue(true, forKey: "shouldHideAnchor")
+            }
+            responder = node.nextResponder
+        }
+    }
+
+    private static func neutralizeSystemGlass(_ root: NSView?) {
+        guard let root else { return }
+        var stack = [root]
+        while let view = stack.popLast() {
+            stack.append(contentsOf: view.subviews)
+            let name = String(describing: type(of: view))
+            if name.contains("GlassEffect") {
+                view.layer?.mask = nil
+                view.layer?.cornerRadius = MeterPalette.radius
+                view.layer?.cornerCurve = .continuous
+                view.layer?.masksToBounds = true
+                if #available(macOS 26.0, *), let glass = view as? NSGlassEffectView {
+                    glass.cornerRadius = MeterPalette.radius
+                    glass.style = .clear
+                    glass.tintColor = NSColor(calibratedWhite: 0.11, alpha: 1)
+                }
+            }
+        }
+    }
+
+    static func pinOpenWindows() {
+        for window in NSApp.windows where window.frame.width >= 360 && window.frame.height >= 500 {
+            style(window)
+        }
+    }
+
+    private static var pinningWindows = Set<ObjectIdentifier>()
+
+    static func pin(_ window: NSWindow) {
+        let identity = ObjectIdentifier(window)
+        guard !pinningWindows.contains(identity) else { return }
+        let primary = NSScreen.screens.first(where: { $0.frame.origin == .zero }) ?? NSScreen.main
+        guard let primary else { return }
+        let visible = primary.visibleFrame
+        var origin = window.frame.origin
+        let size = window.frame.size
+        origin.y = visible.maxY - size.height
+        if origin.x + size.width < visible.minX || origin.x > visible.maxX {
+            origin.x = visible.midX - size.width / 2
+        }
+        if abs(origin.x - window.frame.origin.x) > 0.5 || abs(origin.y - window.frame.origin.y) > 0.5 {
+            pinningWindows.insert(identity)
+            window.setFrameOrigin(origin)
+            pinningWindows.remove(identity)
+        }
+    }
+}
+
+private struct WindowTransparency: NSViewRepresentable {
+    func makeNSView(context: Context) -> WindowTransparencyView {
+        WindowTransparencyView()
+    }
+
+    func updateNSView(_ nsView: WindowTransparencyView, context: Context) {
+        if let window = nsView.window {
+            WindowTransparencyView.style(window)
+        }
+    }
+}
+
+private struct MeterPopoverChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .font(.system(size: MeterPalette.fontSize))
+            .frame(width: 400, height: 640)
+            .background {
+                RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous)
+                    .fill(MeterPalette.panelFill)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: MeterPalette.radius, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.16), lineWidth: 0.6)
+            }
+            .preferredColorScheme(.dark)
+            .background(WindowTransparency())
+    }
+}
+
+private struct MeterInsetDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(.primary.opacity(0.1))
+            .frame(height: 0.5)
+            .padding(.horizontal, 12)
+    }
+}
+
+private struct MeterPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
+private struct MeterSelectable<S: Shape>: ViewModifier {
+    var isSelected: Bool
+    var shape: S
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                shape.fill(Color.primary.opacity(isSelected ? 0.12 : (hovering ? 0.07 : 0)))
+            }
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.14), value: hovering)
+            .animation(.easeOut(duration: 0.14), value: isSelected)
+    }
+}
+
+private struct MeterMenuRow: View {
+    let title: String
+    var symbol: String?
+    var disabled = false
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                if let symbol {
+                    Image(systemName: symbol)
+                        .font(.system(size: 13, weight: .medium))
+                        .frame(width: 22, alignment: .center)
+                        .foregroundStyle(.primary.opacity(0.85))
+                }
+                Text(title)
+                    .font(.system(size: 13))
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous))
+        }
+        .buttonStyle(MeterPressStyle())
+        .disabled(disabled)
+        .background {
+            RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous)
+                .fill(.primary.opacity(hovering && !disabled ? 0.08 : 0))
+        }
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: hovering)
+        .opacity(disabled ? 0.45 : 1)
+    }
+}
+
+private struct MeterToolbarButton<Label: View>: View {
+    var symbol: String?
+    let help: String
+    var disabled = false
+    let action: () -> Void
+    @ViewBuilder var label: () -> Label
+
+    init(symbol: String?, help: String, disabled: Bool = false, action: @escaping () -> Void, @ViewBuilder label: @escaping () -> Label) {
+        self.symbol = symbol
+        self.help = help
+        self.disabled = disabled
+        self.action = action
+        self.label = label
+    }
+
+    var body: some View {
+        Button(action: action, label: label)
+            .disabled(disabled)
+            .help(help)
+            .meterToolbarChrome()
+    }
+}
+
+private extension MeterToolbarButton where Label == Image {
+    init(symbol: String, help: String, disabled: Bool = false, action: @escaping () -> Void) {
+        self.init(symbol: symbol, help: help, disabled: disabled, action: action) {
+            Image(systemName: symbol)
+        }
+    }
+}
+
+private struct MeterToolbarChrome: ViewModifier {
+    @State private var hovering = false
+
+    func body(content: Content) -> some View {
+        content
+            .buttonStyle(MeterPressStyle())
+            .frame(width: 28, height: 28)
+            .contentShape(RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous)
+                    .fill(.primary.opacity(hovering ? 0.08 : 0))
+            }
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.14), value: hovering)
+    }
+}
+
+private extension View {
+    func meterToolbarChrome() -> some View {
+        modifier(MeterToolbarChrome())
+    }
+
+    func meterCard() -> some View {
+        background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    func meterSelectable(isSelected: Bool) -> some View {
+        modifier(MeterSelectable(isSelected: isSelected, shape: RoundedRectangle(cornerRadius: MeterPalette.rowRadius, style: .continuous)))
+    }
+
+    func meterSelectable<S: Shape>(isSelected: Bool, shape: S) -> some View {
+        modifier(MeterSelectable(isSelected: isSelected, shape: shape))
     }
 }
