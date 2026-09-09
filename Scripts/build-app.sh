@@ -22,5 +22,15 @@ for specification in "16 icon_16x16.png" "32 icon_16x16@2x.png" "32 icon_32x32.p
 done
 iconutil -c icns "$iconset_dir" -o "$contents_dir/Resources/CodexMeter.icns"
 rm -R "$icon_work_dir"
-codesign --force --deep --options runtime --sign "${CODE_SIGN_IDENTITY:--}" "$app_dir"
+
+# Ad-hoc + hardened runtime is killed on Apple Silicon as
+# "Code Signature Invalid" / Invalid Page. Keep hardened runtime
+# only when signing with a real identity.
+identity="${CODE_SIGN_IDENTITY:--}"
+xattr -cr "$app_dir" >/dev/null 2>&1 || true
+if [[ "$identity" == "-" ]]; then
+    codesign --force --deep --sign - "$app_dir"
+else
+    codesign --force --deep --options runtime --sign "$identity" "$app_dir"
+fi
 echo "$app_dir"

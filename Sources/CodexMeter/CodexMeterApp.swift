@@ -17,7 +17,8 @@ struct CodexMeterApp: App {
                 .environmentObject(store)
         } label: {
             HStack(spacing: 4) {
-                Image(nsImage: AppIconRenderer.menuBarImage())
+                Image(systemName: MeterSymbol.app)
+                    .symbolRenderingMode(.monochrome)
                 Text(menuTitle)
                     .font(.system(size: 10, weight: .semibold).monospacedDigit())
             }
