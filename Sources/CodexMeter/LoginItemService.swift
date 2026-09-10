@@ -26,7 +26,7 @@ enum LoginItemService {
     }
 
     static func isRunningFromInstalledApp(bundleURL: URL = Bundle.main.bundleURL) -> Bool {
-        standardized(bundleURL) == standardized(installedAppURL)
+        standardizedPath(for: bundleURL) == standardizedPath(for: installedAppURL)
     }
 
     @discardableResult
@@ -123,7 +123,14 @@ enum LoginItemService {
         }
     }
 
-    private static func standardized(_ url: URL) -> URL {
-        url.resolvingSymlinksInPath().standardizedFileURL
+    static func standardizedPath(for url: URL) -> String {
+        let resolved = FileManager.default.fileExists(atPath: url.path)
+            ? url.resolvingSymlinksInPath()
+            : url
+        var path = resolved.standardizedFileURL.path
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        return path
     }
 }

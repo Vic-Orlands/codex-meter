@@ -80,6 +80,14 @@ final class ModelsTests: XCTestCase {
 
     func testLoginItemOnlyRecognizesApplicationsInstall() {
         XCTAssertEqual(LoginItemService.installedAppURL.path, "/Applications/Codex Meter.app")
+        XCTAssertEqual(
+            LoginItemService.standardizedPath(for: URL(fileURLWithPath: "/Applications/Codex Meter.app/")),
+            "/Applications/Codex Meter.app"
+        )
+        XCTAssertEqual(
+            LoginItemService.standardizedPath(for: URL(fileURLWithPath: "/Applications/Missing Codex Meter.app/")),
+            "/Applications/Missing Codex Meter.app"
+        )
         XCTAssertTrue(LoginItemService.isRunningFromInstalledApp(bundleURL: URL(fileURLWithPath: "/Applications/Codex Meter.app")))
         XCTAssertTrue(LoginItemService.isRunningFromInstalledApp(bundleURL: URL(fileURLWithPath: "/Applications/Codex Meter.app/")))
         XCTAssertFalse(LoginItemService.isRunningFromInstalledApp(
