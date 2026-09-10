@@ -130,6 +130,39 @@ final class AccountStore: ObservableObject {
         save()
     }
 
+    @discardableResult
+    func remove(_ profile: AccountProfile) -> Bool {
+        guard let index = profiles.firstIndex(where: { $0.id == profile.id }) else { return false }
+        let wasActive = profile.id == activeID
+
+        do {
+            if wasActive {
+                let liveAuth = liveCodexHome.appendingPathComponent("auth.json")
+                if fileManager.fileExists(atPath: liveAuth.path) {
+                    try fileManager.removeItem(at: liveAuth)
+                }
+            }
+
+            let accountsDirectory = appSupport.appendingPathComponent("Accounts", isDirectory: true).standardizedFileURL
+            let profileHome = profile.homeURL.standardizedFileURL
+            if profileHome.deletingLastPathComponent() == accountsDirectory,
+               fileManager.fileExists(atPath: profileHome.path) {
+                try fileManager.removeItem(at: profileHome)
+            }
+
+            profiles.remove(at: index)
+            snapshots.removeValue(forKey: profile.id)
+            accountErrors.removeValue(forKey: profile.id)
+            if wasActive { activeID = nil }
+            save()
+            if wasActive && restartsCodexDesktopOnSwitch { restartCodexDesktop() }
+            return true
+        } catch {
+            alertMessage = "Could not remove account: \(error.localizedDescription)"
+            return false
+        }
+    }
+
     private func importCurrentAccount() throws {
         let source = liveCodexHome.appendingPathComponent("auth.json")
         guard fileManager.fileExists(atPath: source.path) else { return }
