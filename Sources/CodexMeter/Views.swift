@@ -60,6 +60,7 @@ struct MenuContentView: View {
     @State private var selectedID: UUID?
     @State private var provider: ProviderSelection = .codex
     @State private var providerTransitionForward = true
+    @State private var removalCandidate: AccountProfile?
     @Namespace private var providerTabAnimation
 
     private var selectedProfile: AccountProfile? {
@@ -88,6 +89,27 @@ struct MenuContentView: View {
                 Button("OK", role: .cancel) {}
             } message: {
                 Text(store.alertMessage ?? "")
+            }
+            .confirmationDialog(
+                "Remove account?",
+                isPresented: Binding(
+                    get: { removalCandidate != nil },
+                    set: { if !$0 { removalCandidate = nil } }
+                ),
+                presenting: removalCandidate
+            ) { profile in
+                Button("Remove \(profile.name)", role: .destructive) {
+                    let nextID = store.profiles.first(where: { $0.id != profile.id })?.id
+                    if store.remove(profile) {
+                        selectedID = store.activeID ?? nextID
+                    }
+                    removalCandidate = nil
+                }
+                Button("Cancel", role: .cancel) { removalCandidate = nil }
+            } message: { profile in
+                Text(profile.id == store.activeID
+                    ? "Its saved sign-in will be deleted and Codex will be signed out of this account."
+                    : "Its saved sign-in will be deleted from Codex Meter.")
             }
     }
 
@@ -329,6 +351,9 @@ struct MenuContentView: View {
         VStack(spacing: 2) {
             MeterMenuRow(title: "Add account", symbol: "person.badge.plus.fill", disabled: store.isAddingAccount) {
                 store.addAccount()
+            }
+            MeterMenuRow(title: "Remove account", symbol: "trash.fill") {
+                removalCandidate = selectedProfile
             }
             MeterMenuRow(title: "Open status", symbol: "info.circle.fill") {
                 NSWorkspace.shared.open(URL(string: "https://status.openai.com")!)

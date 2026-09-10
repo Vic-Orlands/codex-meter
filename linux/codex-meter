@@ -27,12 +27,14 @@ from codex_meter_features import (
     ACCOUNTS_DIR,
     AccountStore,
     compact,
+    codex_error_message,
     fetch_codex,
     fetch_cursor,
     login_codex,
     money,
     number,
     remaining,
+    restart_codex_desktop,
     reset_text,
 )
 
@@ -198,6 +200,8 @@ class MeterWindow(Gtk.Window):
         card.pack_start(hero, False, False, 0)
         self.codex_error = Gtk.Label(label="", xalign=0)
         self.codex_error.set_line_wrap(True)
+        self.codex_error.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.codex_error.set_max_width_chars(55)
         self.codex_error.get_style_context().add_class("error")
         card.pack_start(self.codex_error, False, False, 0)
         self.primary = UsageRail("5-hour")
@@ -225,9 +229,12 @@ class MeterWindow(Gtk.Window):
         actions = Gtk.Box(spacing=7)
         rename = Gtk.Button(label="Rename")
         rename.connect("clicked", lambda _button: self.app.rename_selected())
+        remove = Gtk.Button(label="Remove")
+        remove.connect("clicked", lambda _button: self.app.remove_selected())
         status = Gtk.Button(label="Open status")
         status.connect("clicked", lambda _button: webbrowser.open("https://status.openai.com"))
         actions.pack_start(rename, True, True, 0)
+        actions.pack_start(remove, True, True, 0)
         actions.pack_start(status, True, True, 0)
         outer.pack_end(actions, False, False, 0)
         return outer
@@ -479,7 +486,7 @@ class CodexMeterApplication:
             self.window.cursor_error if provider == "cursor"
             else self.window.codex_error
         )
-        target.set_text(message)
+        target.set_text(codex_error_message(message) if provider == "codex" else message)
         return False
 
     def add_account(self):
@@ -542,11 +549,28 @@ class CodexMeterApplication:
             if cached:
                 self.window.update_codex(profile, cached, True)
             self.window.updated.set_text(
-                "Account switched · restart Codex terminals to apply"
+                "Account switched · restarting Codex…"
             )
             self.refresh(provider="codex")
+            threading.Thread(target=self._restart_codex, daemon=True).start()
         except Exception as error:
             self.window.codex_error.set_text(str(error))
+
+    def _restart_codex(self):
+        try:
+            restart_codex_desktop()
+            GLib.idle_add(self._restart_complete)
+        except Exception as error:
+            GLib.idle_add(self._restart_error, str(error))
+
+    def _restart_complete(self):
+        self.window.updated.set_text("Account switched · Codex restarted")
+        return False
+
+    def _restart_error(self, message):
+        self.window.updated.set_text("Account switched")
+        self.window.codex_error.set_text(message)
+        return False
 
     def rename_selected(self):
         profile = self.selected_profile()
@@ -566,6 +590,49 @@ class CodexMeterApplication:
             self.window.load_accounts(self.store.profiles, self.selected_id)
             self.window.codex_name.set_text(profile["name"])
         dialog.destroy()
+
+    def remove_selected(self):
+        profile = self.selected_profile()
+        if not profile:
+            return
+        dialog = Gtk.MessageDialog(
+            transient_for=self.window,
+            modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.CANCEL,
+            text=f"Remove {profile['name']}?",
+        )
+        detail = "Its saved sign-in will be deleted from Codex Meter."
+        if profile["id"] == self.store.active_id:
+            detail += " Codex will be signed out of this account."
+        dialog.format_secondary_text(detail)
+        dialog.add_button("Remove", Gtk.ResponseType.OK)
+        response = dialog.run()
+        dialog.destroy()
+        if response != Gtk.ResponseType.OK:
+            return
+
+        removed_id = profile["id"]
+        try:
+            self.store.remove(profile)
+        except Exception as error:
+            self.window.codex_error.set_text(f"Could not remove account: {error}")
+            return
+        self.snapshots.pop(removed_id, None)
+        self.selected_id = (
+            self.store.active_id
+            or (self.store.profiles[0]["id"] if self.store.profiles else None)
+        )
+        self.window.load_accounts(self.store.profiles, self.selected_id)
+        if self.selected_id:
+            self.account_selected(self.window.account_combo)
+        else:
+            self.window.codex_name.set_text("Codex")
+            self.window.codex_email.set_text("No saved account")
+            self.window.codex_plan.set_text("")
+            self.window.codex_error.set_text("Add a Codex account to begin")
+            self.window.use_account.hide()
+            self.window.updated.set_text("Account removed")
 
     def run(self):
         self.window.show_all()

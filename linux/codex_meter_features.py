@@ -5,6 +5,7 @@ import json
 import os
 import select
 import shutil
+import signal
 import sqlite3
 import subprocess
 import time
@@ -225,6 +226,27 @@ class AccountStore:
             profile["name"] = name.strip()
             self.save()
 
+    def remove(self, profile):
+        if profile not in self.profiles:
+            return
+
+        was_active = profile["id"] == self.active_id
+        self.profiles.remove(profile)
+        if was_active:
+            self.active_id = None
+            live_auth = LIVE_CODEX_HOME / "auth.json"
+            if live_auth.is_file():
+                live_auth.unlink()
+
+        home = Path(profile["codexHome"])
+        try:
+            is_managed_home = home.resolve().parent == ACCOUNTS_DIR.resolve()
+        except OSError:
+            is_managed_home = False
+        if is_managed_home and home.exists():
+            shutil.rmtree(home)
+        self.save()
+
     def switch(self, profile):
         live_auth = LIVE_CODEX_HOME / "auth.json"
         current = self.by_id(self.active_id)
@@ -252,6 +274,51 @@ class AccountStore:
 
     def by_id(self, profile_id):
         return next((item for item in self.profiles if item["id"] == profile_id), None)
+
+
+def codex_error_message(message):
+    lowered = message.lower()
+    if "token_revoked" in lowered or "invalidated oauth token" in lowered:
+        return "This account’s sign-in has expired. Remove it, then add the account again."
+    if "401 unauthorized" in lowered:
+        return "This account is no longer authorized. Remove it, then add the account again."
+    return message if len(message) <= 300 else message[:297] + "…"
+
+
+def restart_codex_desktop(timeout=5):
+    """Close the Linux ChatGPT/Codex desktop app and launch it again."""
+    launcher = shutil.which("gtk-launch")
+    if not launcher:
+        raise RuntimeError(
+            "The account was switched, but Codex could not be reopened automatically."
+        )
+
+    process_ids = subprocess.run(
+        ["pgrep", "-x", "ChatGPT"], capture_output=True, text=True, check=False
+    ).stdout.split()
+    for process_id in process_ids:
+        try:
+            os.kill(int(process_id), signal.SIGTERM)
+        except (ProcessLookupError, ValueError):
+            pass
+
+    deadline = time.monotonic() + timeout
+    while process_ids and time.monotonic() < deadline:
+        process_ids = [
+            process_id for process_id in process_ids
+            if Path(f"/proc/{process_id}").exists()
+        ]
+        if process_ids:
+            time.sleep(0.1)
+    if process_ids:
+        raise RuntimeError(
+            "The account was switched, but Codex did not close. Quit and reopen it to apply."
+        )
+
+    subprocess.Popen(
+        [launcher, "chatgpt"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
 
 
 def cursor_database():

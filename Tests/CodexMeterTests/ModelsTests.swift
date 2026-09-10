@@ -40,6 +40,66 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(permissions?.intValue, 0o600)
     }
 
+    @MainActor
+    func testRemovingActiveAccountDeletesItsSavedAndLiveCredentials() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let support = root.appendingPathComponent("support")
+        let live = root.appendingPathComponent("live")
+        let id = UUID()
+        let home = support.appendingPathComponent("Accounts/\(id.uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: true)
+        try Data("revoked".utf8).write(to: home.appendingPathComponent("auth.json"))
+        try Data("revoked".utf8).write(to: live.appendingPathComponent("auth.json"))
+        let config: [String: Any] = [
+            "profiles": [["id": id.uuidString, "name": "Expired", "codexHome": home.path]],
+            "activeID": id.uuidString,
+        ]
+        try JSONSerialization.data(withJSONObject: config).write(to: support.appendingPathComponent("accounts.json"))
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = AccountStore(appSupport: support, liveCodexHome: live, restartsCodexDesktopOnSwitch: false)
+        XCTAssertTrue(store.remove(store.profiles[0]))
+
+        XCTAssertTrue(store.profiles.isEmpty)
+        XCTAssertNil(store.activeID)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: live.appendingPathComponent("auth.json").path))
+        XCTAssertTrue(AccountStore(appSupport: support, liveCodexHome: live, restartsCodexDesktopOnSwitch: false).profiles.isEmpty)
+    }
+
+    @MainActor
+    func testRemovingInactiveAccountKeepsLiveCredentials() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let support = root.appendingPathComponent("support")
+        let live = root.appendingPathComponent("live")
+        let firstID = UUID()
+        let secondID = UUID()
+        let firstHome = support.appendingPathComponent("Accounts/\(firstID.uuidString)")
+        let secondHome = support.appendingPathComponent("Accounts/\(secondID.uuidString)")
+        try FileManager.default.createDirectory(at: firstHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: secondHome, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: live, withIntermediateDirectories: true)
+        try Data("active".utf8).write(to: live.appendingPathComponent("auth.json"))
+        let config: [String: Any] = [
+            "profiles": [
+                ["id": firstID.uuidString, "name": "First", "codexHome": firstHome.path],
+                ["id": secondID.uuidString, "name": "Second", "codexHome": secondHome.path],
+            ],
+            "activeID": firstID.uuidString,
+        ]
+        try JSONSerialization.data(withJSONObject: config).write(to: support.appendingPathComponent("accounts.json"))
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let store = AccountStore(appSupport: support, liveCodexHome: live, restartsCodexDesktopOnSwitch: false)
+        XCTAssertTrue(store.remove(store.profiles[1]))
+
+        XCTAssertEqual(store.profiles.map(\.id), [firstID])
+        XCTAssertEqual(store.activeID, firstID)
+        XCTAssertEqual(try Data(contentsOf: live.appendingPathComponent("auth.json")), Data("active".utf8))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: secondHome.path))
+    }
+
     func testDecodesRateLimits() throws {
         let data = Data(#"{"rateLimits":{"primary":{"usedPercent":37,"windowDurationMins":300,"resetsAt":1900000000},"secondary":{"usedPercent":12,"windowDurationMins":10080,"resetsAt":1900100000},"credits":{"hasCredits":true,"unlimited":false,"balance":"12.50"},"individualLimit":null,"planType":"plus"},"rateLimitResetCredits":{"availableCount":2}}"#.utf8)
         let response = try JSONDecoder().decode(RateLimitsResponse.self, from: data)
