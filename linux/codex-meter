@@ -15,7 +15,7 @@ try:
     gi.require_version("Gtk", "3.0")
     gi.require_version("AyatanaAppIndicator3", "0.1")
     from gi.repository import AyatanaAppIndicator3 as AppIndicator
-    from gi.repository import GLib, Gtk, Pango
+    from gi.repository import Gdk, GLib, Gtk, Pango
 except (ImportError, ValueError) as error:
     print(
         "codex-meter: install python3-gi, gir1.2-gtk-3.0, and "
@@ -177,9 +177,9 @@ class MeterWindow(Gtk.Window):
         self.account_combo = Gtk.ComboBoxText()
         self.account_combo.connect("changed", self.app.account_selected)
         account_row.pack_start(self.account_combo, True, True, 0)
-        add = Gtk.Button(label="+ Add account")
-        add.connect("clicked", lambda _button: self.app.add_account())
-        account_row.pack_end(add, False, False, 0)
+        self.add_account_button = Gtk.Button(label="+ Add account")
+        self.add_account_button.connect("clicked", lambda _button: self.app.add_account())
+        account_row.pack_end(self.add_account_button, False, False, 0)
         outer.pack_start(account_row, False, False, 0)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -326,6 +326,20 @@ class MeterWindow(Gtk.Window):
         self.use_account.set_visible(not active)
         self.updated.set_text("Updated " + datetime.now().strftime("%H:%M"))
 
+    def show_codex_loading(self, profile, active):
+        self.codex_name.set_text(profile["name"])
+        self.codex_email.set_text("Reading account details…")
+        self.codex_plan.set_text("")
+        self.codex_error.set_text("")
+        self.primary.update(None)
+        self.secondary.update(None)
+        self.credits.set_text("—")
+        self.lifetime.set_text("—")
+        self.streak.set_text("—")
+        self.codex_activity.update([])
+        self.use_account.set_visible(not active)
+        self.updated.set_text("Reading usage…")
+
     def update_cursor(self, data):
         self.cursor_email.set_text(data.get("email") or "Cursor account")
         self.cursor_plan.set_text(
@@ -355,7 +369,9 @@ class CodexMeterApplication:
             self.store.profiles[0]["id"] if self.store.profiles else None
         )
         self.snapshots = {}
-        self.refreshing = False
+        self.fetch_generation = {"codex": 0, "cursor": 0}
+        self.login_in_progress = False
+        self.login_event_time = Gdk.CURRENT_TIME
         self.window = MeterWindow(self)
         self.window.load_accounts(self.store.profiles, self.selected_id)
         self.indicator = AppIndicator.Indicator.new(
@@ -400,23 +416,26 @@ class CodexMeterApplication:
                 profile, self.snapshots[self.selected_id],
                 self.selected_id == self.store.active_id,
             )
+        elif profile:
+            self.window.show_codex_loading(
+                profile, self.selected_id == self.store.active_id
+            )
         self.refresh(provider="codex")
 
     def refresh(self, provider=None):
-        if self.refreshing:
-            return
         provider = provider or self.window.stack.get_visible_child_name()
         profile = self.selected_profile()
         if provider == "codex" and not profile:
             self.window.codex_error.set_text("Add a Codex account to begin")
             return
-        self.refreshing = True
+        self.fetch_generation[provider] += 1
+        generation = self.fetch_generation[provider]
         self.window.updated.set_text("Reading usage…")
         threading.Thread(
-            target=self._fetch, args=(provider, profile), daemon=True
+            target=self._fetch, args=(provider, profile, generation), daemon=True
         ).start()
 
-    def _fetch(self, provider, profile):
+    def _fetch(self, provider, profile, generation):
         try:
             if provider == "cursor":
                 data = fetch_cursor(include_activity=True)
@@ -424,16 +443,20 @@ class CodexMeterApplication:
                 if profile["id"] == self.store.active_id:
                     self.store.sync_active()
                 data = fetch_codex(Path(profile["codexHome"]))
-            GLib.idle_add(self._apply, provider, profile, data)
+            GLib.idle_add(self._apply, provider, profile, data, generation)
         except Exception as error:
-            GLib.idle_add(self._error, provider, str(error))
+            GLib.idle_add(self._error, provider, str(error), generation)
 
-    def _apply(self, provider, profile, data):
-        self.refreshing = False
+    def _apply(self, provider, profile, data, generation):
+        if provider == "codex":
+            self.snapshots[profile["id"]] = data
+        if generation != self.fetch_generation[provider]:
+            return False
         if provider == "cursor":
             self.window.update_cursor(data)
         else:
-            self.snapshots[profile["id"]] = data
+            if profile["id"] != self.selected_id:
+                return False
             self.window.update_codex(
                 profile, data, profile["id"] == self.store.active_id
             )
@@ -448,8 +471,9 @@ class CodexMeterApplication:
                 )
         return False
 
-    def _error(self, provider, message):
-        self.refreshing = False
+    def _error(self, provider, message, generation):
+        if generation != self.fetch_generation[provider]:
+            return False
         self.window.updated.set_text("Refresh failed")
         target = (
             self.window.cursor_error if provider == "cursor"
@@ -459,10 +483,12 @@ class CodexMeterApplication:
         return False
 
     def add_account(self):
-        if self.refreshing:
+        if self.login_in_progress:
             return
+        self.login_in_progress = True
+        self.login_event_time = Gtk.get_current_event_time() or Gdk.CURRENT_TIME
+        self.window.add_account_button.set_sensitive(False)
         home = ACCOUNTS_DIR / str(uuid.uuid4())
-        self.refreshing = True
         self.window.updated.set_text("Waiting for browser sign-in…")
         threading.Thread(target=self._login, args=(home,), daemon=True).start()
 
@@ -471,20 +497,38 @@ class CodexMeterApplication:
             data = login_codex(home, lambda url: GLib.idle_add(self._open_login, url))
             GLib.idle_add(self._login_complete, home, data)
         except Exception as error:
-            GLib.idle_add(self._error, "codex", str(error))
+            GLib.idle_add(self._login_error, str(error))
 
     def _open_login(self, url):
-        webbrowser.open(url)
+        self.window.iconify()
+        try:
+            opened = Gtk.show_uri_on_window(self.window, url, self.login_event_time)
+            if not opened:
+                webbrowser.open(url, new=2, autoraise=True)
+        except GLib.Error:
+            webbrowser.open(url, new=2, autoraise=True)
         return False
 
     def _login_complete(self, home, data):
-        self.refreshing = False
+        self.login_in_progress = False
+        self.window.add_account_button.set_sensitive(True)
         profile = self.store.add(data, home)
         self.selected_id = profile["id"]
         self.snapshots[profile["id"]] = data
         self.window.load_accounts(self.store.profiles, self.selected_id)
         self.window.update_codex(profile, data, False)
         self.window.updated.set_text("Account added")
+        self.window.deiconify()
+        self.window.present()
+        return False
+
+    def _login_error(self, message):
+        self.login_in_progress = False
+        self.window.add_account_button.set_sensitive(True)
+        self.window.updated.set_text("Sign-in failed")
+        self.window.codex_error.set_text(message)
+        self.window.deiconify()
+        self.window.present()
         return False
 
     def use_selected_account(self):
@@ -494,6 +538,9 @@ class CodexMeterApplication:
         try:
             self.store.switch(profile)
             self.window.use_account.hide()
+            cached = self.snapshots.get(profile["id"])
+            if cached:
+                self.window.update_codex(profile, cached, True)
             self.window.updated.set_text(
                 "Account switched · restart Codex terminals to apply"
             )

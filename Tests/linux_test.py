@@ -83,6 +83,5 @@ class LinuxProviderTests(unittest.TestCase):
         ), mock.patch.object(features, "CODEX_FALLBACK_PATHS", (executable,)):
             self.assertEqual(features.codex_executable(), str(executable))
 
-
 if __name__ == "__main__":
     unittest.main()
