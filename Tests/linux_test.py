@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / "linux" / "codex_meter_features.py"
@@ -73,6 +74,14 @@ class LinuxProviderTests(unittest.TestCase):
         self.assertEqual(features.remaining({"usedPercent": 27}), 73)
         self.assertEqual(features.compact(4_451_062_882), "4.5B")
         self.assertEqual(features.money(1250), "$12.50")
+
+    def test_finds_codex_outside_desktop_path(self):
+        executable = Path(self.temporary.name) / "bundled-codex"
+        executable.touch(mode=0o755)
+        with mock.patch.dict(features.os.environ, {}, clear=True), mock.patch.object(
+            features.shutil, "which", return_value=None
+        ), mock.patch.object(features, "CODEX_FALLBACK_PATHS", (executable,)):
+            self.assertEqual(features.codex_executable(), str(executable))
 
 
 if __name__ == "__main__":
