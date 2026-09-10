@@ -10,6 +10,7 @@ final class AccountStore: ObservableObject {
     @Published private(set) var cursorError: String?
     @Published private(set) var accountErrors: [UUID: String] = [:]
     @Published private(set) var isRefreshing = false
+    @Published private(set) var isAddingAccount = false
     @Published var alertMessage: String?
 
     @Published var customCodexPath: String {
@@ -76,11 +77,12 @@ final class AccountStore: ObservableObject {
     }
 
     func addAccount() {
+        guard !isAddingAccount else { return }
         let id = UUID()
         let home = appSupport.appendingPathComponent("Accounts/\(id.uuidString)", isDirectory: true)
         let name = "Account \(profiles.count + 1)"
         let executable = CodexAppServer.locateExecutable(customPath: customCodexPath)
-        isRefreshing = true
+        isAddingAccount = true
 
         Task.detached(priority: .userInitiated) {
             do {
@@ -91,12 +93,12 @@ final class AccountStore: ObservableObject {
                     let profile = AccountProfile(id: id, name: snapshot.email ?? name, codexHome: home.path)
                     self.profiles.append(profile)
                     self.snapshots[id] = snapshot
-                    self.isRefreshing = false
+                    self.isAddingAccount = false
                     self.save()
                 }
             } catch {
                 await MainActor.run {
-                    self.isRefreshing = false
+                    self.isAddingAccount = false
                     self.alertMessage = CodexAppServer.userFacingMessage(for: error)
                 }
             }
