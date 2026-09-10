@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Codex Meter
+Comment=Keep Codex usage limits visible
+Exec=@EXEC@
+Icon=codex-meter
+Terminal=false
+Categories=Utility;Development;
+StartupNotify=true
+X-GNOME-Autostart-enabled=true
