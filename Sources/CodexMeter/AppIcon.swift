@@ -3,8 +3,6 @@ import SwiftUI
 
 enum MeterSymbol {
     static let app = "switch.2"
-    static let codex = "brain.head.profile"
-    static let cursor = "cursorarrow"
 }
 
 struct SwitchLogo: View {
@@ -13,7 +11,7 @@ struct SwitchLogo: View {
 
     var body: some View {
         Image(systemName: MeterSymbol.app)
-            .font(.system(size: size * 0.72, weight: .semibold))
+            .font(.system(size: size, weight: .medium))
             .foregroundStyle(color)
             .symbolRenderingMode(.monochrome)
             .frame(width: size, height: size)
@@ -32,21 +30,17 @@ struct ProviderProductIcon: View {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)
-                    .scaledToFit()
+                    .scaledToFill()
+                    // macOS app icons include transparent padding; crop so the mark fills iconSize.
+                    .scaleEffect(1.18)
             } else {
-                Image(systemName: product == .codex ? MeterSymbol.codex : MeterSymbol.cursor)
-                    .resizable()
-                    .scaledToFit()
-                    .padding(size * 0.12)
-                    .symbolRenderingMode(.hierarchical)
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color.primary.opacity(0.12))
             }
         }
         .frame(width: size, height: size)
+        .clipped()
         .clipShape(RoundedRectangle(cornerRadius: size * 0.22, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5)
-        }
         .accessibilityHidden(true)
     }
 }
