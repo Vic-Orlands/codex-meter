@@ -65,6 +65,29 @@ codex-meter --json
 
 Use `--codex PATH` when Codex is not on `PATH`, or `--codex-home PATH` to inspect another Codex home.
 
+### Ubuntu desktop app
+
+Ubuntu 22.04 or newer can run Codex Meter as a GTK desktop and tray app. It
+supports multiple Codex accounts, safe account switching, usage history, and
+Cursor usage from Cursor's local signed-in session:
+
+![Codex Meter Ubuntu tray interface](docs/images/codex-meter-linux.png)
+
+```sh
+git clone https://github.com/Vic-Orlands/codex-meter.git
+cd codex-meter
+Scripts/install-ubuntu.sh
+gtk-launch io.github.vicorlands.CodexMeter
+```
+
+Pass `--autostart` to the installer to start Codex Meter when you sign in. The app
+requires Python 3, GTK 3, Ayatana AppIndicator, and the official Codex CLI. On a
+minimal Ubuntu installation, install the desktop bindings with:
+
+```sh
+sudo apt install python3-gi gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
+```
+
 ## Privacy model
 
 - No third-party runtime dependencies.
@@ -93,7 +116,11 @@ python3 -m unittest Tests/cli_test.py
 
 ## Platform scope
 
-The tray interface uses SwiftUI and AppKit and is therefore macOS-only. The CLI runs on macOS and Linux and uses the same official app-server boundary without reading credentials. Cursor tracking is currently available only in the macOS app because it depends on Cursor's macOS local state.
+The macOS interface uses SwiftUI and AppKit. Ubuntu has a GTK 3 and Ayatana
+AppIndicator interface; the CLI also runs on macOS and Linux. Both desktop apps
+use the official Codex app-server boundary without parsing credentials. Cursor
+tracking opens Cursor's platform-specific state database read-only and keeps its
+short-lived session token only in memory.
 
 ## License
 

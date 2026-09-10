@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+
+"""Ubuntu GTK and tray interface for Codex Meter."""
+
+import sys
+import threading
+import uuid
+import webbrowser
+from datetime import datetime, timedelta
+from pathlib import Path
+
+try:
+    import gi
+
+    gi.require_version("Gtk", "3.0")
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3 as AppIndicator
+    from gi.repository import GLib, Gtk, Pango
+except (ImportError, ValueError) as error:
+    print(
+        "codex-meter: install python3-gi, gir1.2-gtk-3.0, and "
+        "gir1.2-ayatanaappindicator3-0.1.", file=sys.stderr,
+    )
+    raise SystemExit(1) from error
+
+from codex_meter_features import (
+    ACCOUNTS_DIR,
+    AccountStore,
+    compact,
+    fetch_codex,
+    fetch_cursor,
+    login_codex,
+    money,
+    number,
+    remaining,
+    reset_text,
+)
+
+
+APP_ID = "io.github.vicorlands.CodexMeter"
+REFRESH_SECONDS = 60
+
+
+class UsageRail(Gtk.Box):
+    def __init__(self, title):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        row = Gtk.Box()
+        row.pack_start(Gtk.Label(label=title, xalign=0), True, True, 0)
+        self.value = Gtk.Label(label="—", xalign=1)
+        row.pack_end(self.value, False, False, 0)
+        self.pack_start(row, False, False, 0)
+        self.bar = Gtk.ProgressBar()
+        self.pack_start(self.bar, False, False, 0)
+        self.detail = Gtk.Label(label="", xalign=1)
+        self.detail.get_style_context().add_class("dim-label")
+        self.pack_start(self.detail, False, False, 0)
+
+    def update(self, percent, detail=""):
+        self.bar.set_fraction(max(0, min(100, percent or 0)) / 100)
+        self.value.set_text("—" if percent is None else f"{round(percent)}% used")
+        self.detail.set_text(detail)
+
+
+class ActivityGrid(Gtk.DrawingArea):
+    def __init__(self):
+        super().__init__()
+        self.values = [0] * 112
+        self.set_size_request(-1, 78)
+        self.connect("draw", self._draw)
+
+    def update(self, buckets):
+        values = {
+            item.get("startDate", "")[:10]: number(item.get("tokens"))
+            for item in buckets
+        }
+        today = datetime.now().date()
+        self.values = [
+            values.get((today - timedelta(days=111 - index)).isoformat(), 0)
+            for index in range(112)
+        ]
+        self.queue_draw()
+
+    def _draw(self, _widget, context):
+        width = self.get_allocated_width()
+        gap, cell = 3, max(3, (width - 15 * 3) / 16)
+        maximum = max(self.values or [1])
+        for index, value in enumerate(self.values):
+            column, row = divmod(index, 7)
+            intensity = value / maximum if maximum else 0
+            color = (
+                (0.22, 0.78, 0.67, 0.30 + intensity * 0.70)
+                if value else (0.32, 0.32, 0.34, 0.45)
+            )
+            context.set_source_rgba(*color)
+            context.rectangle(column * (cell + gap), row * 11, cell, 8)
+            context.fill()
+
+
+def stat(title):
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+    label = Gtk.Label(label=title, xalign=0)
+    label.get_style_context().add_class("dim-label")
+    value = Gtk.Label(label="—", xalign=0)
+    value.set_ellipsize(Pango.EllipsizeMode.END)
+    box.pack_start(label, False, False, 0)
+    box.pack_start(value, False, False, 0)
+    return box, value
+
+
+class MeterWindow(Gtk.Window):
+    def __init__(self, app):
+        super().__init__(title="Codex Meter")
+        self.app = app
+        self.set_default_size(410, 640)
+        self.set_resizable(False)
+        self.connect("delete-event", self._hide)
+        self._install_css()
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(root)
+        root.pack_start(self._header(), False, False, 0)
+        root.pack_start(Gtk.Separator(), False, False, 0)
+
+        self.stack = Gtk.Stack(
+            transition_type=Gtk.StackTransitionType.SLIDE_LEFT_RIGHT,
+            transition_duration=180,
+        )
+        self.stack.add_titled(self._codex_page(), "codex", "Codex")
+        self.stack.add_titled(self._cursor_page(), "cursor", "Cursor")
+        tabs = Gtk.StackSwitcher(stack=self.stack)
+        tab_row = Gtk.Box()
+        tab_row.pack_start(tabs, True, True, 14)
+        root.pack_start(tab_row, False, False, 4)
+        root.pack_start(Gtk.Separator(), False, False, 0)
+        root.pack_start(self.stack, True, True, 0)
+        self.stack.connect("notify::visible-child-name", lambda *_: app.refresh())
+
+    def _install_css(self):
+        css = Gtk.CssProvider()
+        css.load_from_data(b"""
+            window { background: #1d1d20; color: #f5f5f7; }
+            .header { padding: 12px 14px; }
+            .content { padding: 12px 16px 16px; }
+            .card { background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.09); border-radius: 10px; padding: 12px; }
+            .dim-label { color: #97979f; font-size: 11px; }
+            .hero { font-size: 14px; font-weight: 600; }
+            .error { color: #f0a35e; }
+            progressbar trough { min-height: 5px; border-radius: 4px; background: rgba(255,255,255,.12); }
+            progressbar progress { min-height: 5px; border-radius: 4px; background: #38c8b0; }
+            stackswitcher button { min-width: 120px; }
+        """)
+        Gtk.StyleContext.add_provider_for_screen(
+            self.get_screen(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+    def _header(self):
+        row = Gtk.Box(spacing=8)
+        row.get_style_context().add_class("header")
+        labels = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        title = Gtk.Label(label="Codex Meter", xalign=0)
+        title.get_style_context().add_class("hero")
+        self.updated = Gtk.Label(label="Local account monitor", xalign=0)
+        self.updated.get_style_context().add_class("dim-label")
+        labels.pack_start(title, False, False, 0)
+        labels.pack_start(self.updated, False, False, 0)
+        row.pack_start(labels, True, True, 0)
+        button = Gtk.Button.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON)
+        button.set_tooltip_text("Refresh usage")
+        button.connect("clicked", lambda _button: self.app.refresh())
+        row.pack_end(button, False, False, 0)
+        return row
+
+    def _codex_page(self):
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=11)
+        outer.get_style_context().add_class("content")
+        account_row = Gtk.Box(spacing=7)
+        self.account_combo = Gtk.ComboBoxText()
+        self.account_combo.connect("changed", self.app.account_selected)
+        account_row.pack_start(self.account_combo, True, True, 0)
+        add = Gtk.Button(label="+ Add account")
+        add.connect("clicked", lambda _button: self.app.add_account())
+        account_row.pack_end(add, False, False, 0)
+        outer.pack_start(account_row, False, False, 0)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        card.get_style_context().add_class("card")
+        hero = Gtk.Box()
+        identity = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        self.codex_name = Gtk.Label(label="Codex", xalign=0)
+        self.codex_name.get_style_context().add_class("hero")
+        self.codex_email = Gtk.Label(label="Waiting for account details", xalign=0)
+        self.codex_email.get_style_context().add_class("dim-label")
+        identity.pack_start(self.codex_name, False, False, 0)
+        identity.pack_start(self.codex_email, False, False, 0)
+        hero.pack_start(identity, True, True, 0)
+        self.codex_plan = Gtk.Label(label="", xalign=1)
+        hero.pack_end(self.codex_plan, False, False, 0)
+        card.pack_start(hero, False, False, 0)
+        self.codex_error = Gtk.Label(label="", xalign=0)
+        self.codex_error.set_line_wrap(True)
+        self.codex_error.get_style_context().add_class("error")
+        card.pack_start(self.codex_error, False, False, 0)
+        self.primary = UsageRail("5-hour")
+        self.secondary = UsageRail("Weekly")
+        card.pack_start(self.primary, False, False, 0)
+        card.pack_start(self.secondary, False, False, 0)
+        self.use_account = Gtk.Button(label="Use this account")
+        self.use_account.connect("clicked", lambda _button: self.app.use_selected_account())
+        card.pack_start(self.use_account, False, False, 0)
+        outer.pack_start(card, False, False, 0)
+
+        stats = Gtk.Box(homogeneous=True, spacing=12)
+        credits, self.credits = stat("Credits")
+        lifetime, self.lifetime = stat("Lifetime")
+        streak, self.streak = stat("Streak")
+        for widget in (credits, lifetime, streak):
+            stats.pack_start(widget, True, True, 0)
+        stats.get_style_context().add_class("card")
+        outer.pack_start(stats, False, False, 0)
+        activity_title = Gtk.Label(label="Token activity · 16 weeks", xalign=0)
+        activity_title.get_style_context().add_class("hero")
+        outer.pack_start(activity_title, False, False, 0)
+        self.codex_activity = ActivityGrid()
+        outer.pack_start(self.codex_activity, False, False, 0)
+        actions = Gtk.Box(spacing=7)
+        rename = Gtk.Button(label="Rename")
+        rename.connect("clicked", lambda _button: self.app.rename_selected())
+        status = Gtk.Button(label="Open status")
+        status.connect("clicked", lambda _button: webbrowser.open("https://status.openai.com"))
+        actions.pack_start(rename, True, True, 0)
+        actions.pack_start(status, True, True, 0)
+        outer.pack_end(actions, False, False, 0)
+        return outer
+
+    def _cursor_page(self):
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=11)
+        outer.get_style_context().add_class("content")
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        card.get_style_context().add_class("card")
+        header = Gtk.Box()
+        identity = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        title = Gtk.Label(label="Cursor", xalign=0)
+        title.get_style_context().add_class("hero")
+        self.cursor_email = Gtk.Label(label="Reading Cursor usage…", xalign=0)
+        self.cursor_email.get_style_context().add_class("dim-label")
+        identity.pack_start(title, False, False, 0)
+        identity.pack_start(self.cursor_email, False, False, 0)
+        header.pack_start(identity, True, True, 0)
+        self.cursor_plan = Gtk.Label(label="", xalign=1)
+        header.pack_end(self.cursor_plan, False, False, 0)
+        card.pack_start(header, False, False, 0)
+        self.cursor_error = Gtk.Label(label="", xalign=0)
+        self.cursor_error.set_line_wrap(True)
+        self.cursor_error.get_style_context().add_class("error")
+        card.pack_start(self.cursor_error, False, False, 0)
+        self.auto_rail = UsageRail("Auto")
+        self.models_rail = UsageRail("Models")
+        card.pack_start(self.auto_rail, False, False, 0)
+        card.pack_start(self.models_rail, False, False, 0)
+        included = Gtk.Box()
+        included.pack_start(Gtk.Label(label="Included usage", xalign=0), True, True, 0)
+        self.included = Gtk.Label(label="—", xalign=1)
+        included.pack_end(self.included, False, False, 0)
+        card.pack_start(included, False, False, 0)
+        outer.pack_start(card, False, False, 0)
+
+        stats = Gtk.Box(homogeneous=True, spacing=12)
+        tokens, self.cursor_tokens = stat("Tokens")
+        demand, self.on_demand = stat("On demand")
+        left, self.plan_left = stat("Plan left")
+        for widget in (tokens, demand, left):
+            stats.pack_start(widget, True, True, 0)
+        stats.get_style_context().add_class("card")
+        outer.pack_start(stats, False, False, 0)
+        activity_title = Gtk.Label(label="Token activity · 16 weeks", xalign=0)
+        activity_title.get_style_context().add_class("hero")
+        outer.pack_start(activity_title, False, False, 0)
+        self.cursor_activity = ActivityGrid()
+        outer.pack_start(self.cursor_activity, False, False, 0)
+        dashboard = Gtk.Button(label="Open Cursor dashboard")
+        dashboard.connect(
+            "clicked", lambda _button: webbrowser.open("https://cursor.com/dashboard?tab=usage")
+        )
+        outer.pack_end(dashboard, False, False, 0)
+        return outer
+
+    def load_accounts(self, profiles, selected_id):
+        self.account_combo.handler_block_by_func(self.app.account_selected)
+        self.account_combo.remove_all()
+        selected_index = 0
+        for index, profile in enumerate(profiles):
+            self.account_combo.append(profile["id"], profile["name"])
+            if profile["id"] == selected_id:
+                selected_index = index
+        if profiles:
+            self.account_combo.set_active(selected_index)
+        self.account_combo.handler_unblock_by_func(self.app.account_selected)
+
+    def update_codex(self, profile, data, active):
+        account = data.get("account") or {}
+        limits = data.get("rateLimits") or {}
+        usage = data.get("usage") or {}
+        self.codex_name.set_text(profile["name"])
+        self.codex_email.set_text(account.get("email") or "Waiting for account details")
+        self.codex_plan.set_text(
+            (account.get("planType") or limits.get("planType") or "").upper()
+        )
+        self.codex_error.set_text("")
+        for rail, window in (
+            (self.primary, limits.get("primary")),
+            (self.secondary, limits.get("secondary")),
+        ):
+            rail.update(None if not window else number(window.get("usedPercent")), reset_text(window))
+        credits = limits.get("credits") or {}
+        credit_text = (
+            "Unlimited" if credits.get("unlimited")
+            else str(credits.get("balance") or (
+                "Available" if credits.get("hasCredits") else "None"
+            ))
+        )
+        self.credits.set_text(credit_text)
+        self.lifetime.set_text(compact(usage.get("lifetimeTokens")))
+        streak = usage.get("currentStreakDays")
+        self.streak.set_text(f"{number(streak)}d" if streak is not None else "—")
+        self.codex_activity.update(data.get("dailyUsage") or [])
+        self.use_account.set_visible(not active)
+        self.updated.set_text("Updated " + datetime.now().strftime("%H:%M"))
+
+    def update_cursor(self, data):
+        self.cursor_email.set_text(data.get("email") or "Cursor account")
+        self.cursor_plan.set_text(
+            (data.get("membershipType") or "").replace("_", " ").upper()
+        )
+        self.cursor_error.set_text("")
+        self.auto_rail.update(data.get("autoPercentUsed"))
+        self.models_rail.update(data.get("apiPercentUsed"))
+        self.included.set_text(
+            f"{money(data.get('planUsedCents'))} of {money(data.get('planLimitCents'))}"
+        )
+        self.cursor_tokens.set_text(compact(data.get("totalTokens")))
+        self.on_demand.set_text(money(data.get("onDemandUsedCents")))
+        self.plan_left.set_text(f"{round(100 - (data.get('planPercentUsed') or 0))}%")
+        self.cursor_activity.update(data.get("dailyUsage") or [])
+        self.updated.set_text("Updated " + datetime.now().strftime("%H:%M"))
+
+    def _hide(self, *_args):
+        self.hide()
+        return True
+
+
+class CodexMeterApplication:
+    def __init__(self):
+        self.store = AccountStore()
+        self.selected_id = self.store.active_id or (
+            self.store.profiles[0]["id"] if self.store.profiles else None
+        )
+        self.snapshots = {}
+        self.refreshing = False
+        self.window = MeterWindow(self)
+        self.window.load_accounts(self.store.profiles, self.selected_id)
+        self.indicator = AppIndicator.Indicator.new(
+            APP_ID, "codex-meter", AppIndicator.IndicatorCategory.APPLICATION_STATUS
+        )
+        self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        self.indicator.set_title("Codex Meter")
+        self.menu = Gtk.Menu()
+        self.summary_item = Gtk.MenuItem(label="Codex Meter · Loading…")
+        self.summary_item.set_sensitive(False)
+        self.menu.append(self.summary_item)
+        for label, callback in (
+            ("Open Codex Meter", self.show),
+            ("Refresh", lambda *_args: self.refresh()),
+        ):
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", callback)
+            self.menu.append(item)
+        self.menu.append(Gtk.SeparatorMenuItem())
+        quit_item = Gtk.MenuItem(label="Quit")
+        quit_item.connect("activate", lambda _item: Gtk.main_quit())
+        self.menu.append(quit_item)
+        self.menu.show_all()
+        self.indicator.set_menu(self.menu)
+
+    def show(self, *_args):
+        self.window.show_all()
+        profile = self.selected_profile()
+        self.window.use_account.set_visible(
+            bool(profile and profile["id"] != self.store.active_id)
+        )
+        self.window.present()
+
+    def selected_profile(self):
+        return self.store.by_id(self.selected_id)
+
+    def account_selected(self, combo):
+        self.selected_id = combo.get_active_id()
+        profile = self.selected_profile()
+        if profile and self.selected_id in self.snapshots:
+            self.window.update_codex(
+                profile, self.snapshots[self.selected_id],
+                self.selected_id == self.store.active_id,
+            )
+        self.refresh(provider="codex")
+
+    def refresh(self, provider=None):
+        if self.refreshing:
+            return
+        provider = provider or self.window.stack.get_visible_child_name()
+        profile = self.selected_profile()
+        if provider == "codex" and not profile:
+            self.window.codex_error.set_text("Add a Codex account to begin")
+            return
+        self.refreshing = True
+        self.window.updated.set_text("Reading usage…")
+        threading.Thread(
+            target=self._fetch, args=(provider, profile), daemon=True
+        ).start()
+
+    def _fetch(self, provider, profile):
+        try:
+            if provider == "cursor":
+                data = fetch_cursor(include_activity=True)
+            else:
+                if profile["id"] == self.store.active_id:
+                    self.store.sync_active()
+                data = fetch_codex(Path(profile["codexHome"]))
+            GLib.idle_add(self._apply, provider, profile, data)
+        except Exception as error:
+            GLib.idle_add(self._error, provider, str(error))
+
+    def _apply(self, provider, profile, data):
+        self.refreshing = False
+        if provider == "cursor":
+            self.window.update_cursor(data)
+        else:
+            self.snapshots[profile["id"]] = data
+            self.window.update_codex(
+                profile, data, profile["id"] == self.store.active_id
+            )
+            if profile["id"] == self.store.active_id:
+                primary = remaining((data.get("rateLimits") or {}).get("primary"))
+                self.summary_item.set_label(
+                    f"Codex Meter · {primary}% remaining"
+                    if primary is not None else "Codex Meter"
+                )
+                self.indicator.set_label(
+                    f" {primary}%" if primary is not None else "", " 100%"
+                )
+        return False
+
+    def _error(self, provider, message):
+        self.refreshing = False
+        self.window.updated.set_text("Refresh failed")
+        target = (
+            self.window.cursor_error if provider == "cursor"
+            else self.window.codex_error
+        )
+        target.set_text(message)
+        return False
+
+    def add_account(self):
+        if self.refreshing:
+            return
+        home = ACCOUNTS_DIR / str(uuid.uuid4())
+        self.refreshing = True
+        self.window.updated.set_text("Waiting for browser sign-in…")
+        threading.Thread(target=self._login, args=(home,), daemon=True).start()
+
+    def _login(self, home):
+        try:
+            data = login_codex(home, lambda url: GLib.idle_add(self._open_login, url))
+            GLib.idle_add(self._login_complete, home, data)
+        except Exception as error:
+            GLib.idle_add(self._error, "codex", str(error))
+
+    def _open_login(self, url):
+        webbrowser.open(url)
+        return False
+
+    def _login_complete(self, home, data):
+        self.refreshing = False
+        profile = self.store.add(data, home)
+        self.selected_id = profile["id"]
+        self.snapshots[profile["id"]] = data
+        self.window.load_accounts(self.store.profiles, self.selected_id)
+        self.window.update_codex(profile, data, False)
+        self.window.updated.set_text("Account added")
+        return False
+
+    def use_selected_account(self):
+        profile = self.selected_profile()
+        if not profile:
+            return
+        try:
+            self.store.switch(profile)
+            self.window.use_account.hide()
+            self.window.updated.set_text(
+                "Account switched · restart Codex terminals to apply"
+            )
+            self.refresh(provider="codex")
+        except Exception as error:
+            self.window.codex_error.set_text(str(error))
+
+    def rename_selected(self):
+        profile = self.selected_profile()
+        if not profile:
+            return
+        dialog = Gtk.Dialog(title="Rename account", transient_for=self.window, modal=True)
+        dialog.add_buttons(
+            "Cancel", Gtk.ResponseType.CANCEL, "Rename", Gtk.ResponseType.OK
+        )
+        entry = Gtk.Entry(text=profile["name"])
+        entry.set_activates_default(True)
+        dialog.get_content_area().pack_start(entry, True, True, 14)
+        dialog.set_default_response(Gtk.ResponseType.OK)
+        dialog.show_all()
+        if dialog.run() == Gtk.ResponseType.OK:
+            self.store.rename(profile, entry.get_text())
+            self.window.load_accounts(self.store.profiles, self.selected_id)
+            self.window.codex_name.set_text(profile["name"])
+        dialog.destroy()
+
+    def run(self):
+        self.window.show_all()
+        self.refresh()
+        GLib.timeout_add_seconds(REFRESH_SECONDS, self._timer)
+        Gtk.main()
+
+    def _timer(self):
+        self.refresh(provider="codex")
+        return True
+
+
+if __name__ == "__main__":
+    CodexMeterApplication().run()
