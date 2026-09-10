@@ -13,6 +13,7 @@ let package = Package(
             linkerSettings: [
                 .linkedLibrary("sqlite3"),
                 .linkedFramework("SystemConfiguration"),
+                .linkedFramework("ServiceManagement"),
             ]
         ),
         .testTarget(name: "CodexMeterTests", dependencies: ["CodexMeter"])

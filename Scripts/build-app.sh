@@ -1,6 +1,11 @@
 #!/bin/zsh
 set -euo pipefail
 
+install_app=false
+if [[ "${1:-}" == "--install" ]]; then
+    install_app=true
+fi
+
 project_dir="${0:A:h:h}"
 cd "$project_dir"
 swift build -c release
@@ -8,6 +13,8 @@ swift build -c release
 app_dir="$project_dir/dist/Codex Meter.app"
 contents_dir="$app_dir/Contents"
 mkdir -p "$contents_dir/MacOS" "$contents_dir/Resources"
+# Keep Launchpad/Spotlight from indexing the build artifact as a second app.
+touch "$project_dir/dist/.metadata_never_index"
 cp "$project_dir/.build/release/CodexMeter" "$contents_dir/MacOS/CodexMeter"
 cp "$project_dir/Info.plist" "$contents_dir/Info.plist"
 
@@ -33,4 +40,15 @@ if [[ "$identity" == "-" ]]; then
 else
     codesign --force --deep --options runtime --sign "$identity" "$app_dir"
 fi
+
+# Dist is a build artifact, not a second install. Drop it from Launch Services
+# so Launchpad does not keep a duplicate Codex Meter icon.
+lsregister="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$lsregister" ]]; then
+    "$lsregister" -u "$app_dir" >/dev/null 2>&1 || true
+fi
 echo "$app_dir"
+
+if $install_app; then
+    "$project_dir/Scripts/install-app.sh"
+fi
