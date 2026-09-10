@@ -19,6 +19,13 @@ CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / 
 ACCOUNTS_DIR = CONFIG_DIR / "accounts"
 CONFIG_FILE = CONFIG_DIR / "accounts.json"
 LIVE_CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+CODEX_FALLBACK_PATHS = (
+    Path("/usr/lib/chatgpt/resources/codex"),
+    Path.home() / ".local/bin/codex",
+    Path.home() / ".cargo/bin/codex",
+    Path.home() / ".npm-global/bin/codex",
+    Path.home() / ".bun/bin/codex",
+)
 
 
 class AppServer:
@@ -103,12 +110,23 @@ class AppServer:
 
 
 def codex_executable():
-    executable = os.environ.get("CODEX_METER_CODEX_PATH") or shutil.which("codex")
-    if not executable:
-        raise RuntimeError(
-            "Codex CLI was not found. Install Codex or set CODEX_METER_CODEX_PATH."
-        )
-    return executable
+    configured = os.environ.get("CODEX_METER_CODEX_PATH")
+    if configured:
+        return os.path.expanduser(configured)
+
+    executable = shutil.which("codex")
+    if executable:
+        return executable
+
+    # Desktop sessions commonly have a smaller PATH than interactive shells.
+    # In particular, Codex Desktop bundles its CLI outside the standard PATH.
+    for candidate in CODEX_FALLBACK_PATHS:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+
+    raise RuntimeError(
+        "Codex CLI was not found. Install Codex or set CODEX_METER_CODEX_PATH."
+    )
 
 
 def fetch_codex(codex_home):
