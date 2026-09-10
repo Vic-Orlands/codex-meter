@@ -726,9 +726,16 @@ private struct TokenActivityCard: View {
 struct SettingsView: View {
     @EnvironmentObject private var store: AccountStore
     @AppStorage("showDockIcon") private var showDockIcon = false
+    @AppStorage(LoginItemService.preferenceKey) private var openAtLogin = true
 
     var body: some View {
         Form {
+            Section("Startup") {
+                Toggle("Open at login", isOn: $openAtLogin)
+                    .onChange(of: openAtLogin) { _, value in
+                        LoginItemService.setEnabled(value)
+                    }
+            }
             Section("Appearance") {
                 Toggle("Show Dock icon", isOn: $showDockIcon)
                     .onChange(of: showDockIcon) { _, value in
@@ -748,7 +755,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 480, height: 330)
+        .frame(width: 480, height: 380)
         .padding()
     }
 }

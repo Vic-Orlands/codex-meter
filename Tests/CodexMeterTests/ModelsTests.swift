@@ -78,6 +78,27 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(response.dailyUsageBuckets?.first?.tokens, 4200)
     }
 
+    func testLoginItemOnlyRecognizesApplicationsInstall() {
+        XCTAssertEqual(LoginItemService.installedAppURL.path, "/Applications/Codex Meter.app")
+        XCTAssertEqual(
+            LoginItemService.standardizedPath(for: URL(fileURLWithPath: "/Applications/Codex Meter.app/")),
+            "/Applications/Codex Meter.app"
+        )
+        XCTAssertEqual(
+            LoginItemService.standardizedPath(for: URL(fileURLWithPath: "/Applications/Missing Codex Meter.app/")),
+            "/Applications/Missing Codex Meter.app"
+        )
+        XCTAssertTrue(LoginItemService.isRunningFromInstalledApp(bundleURL: URL(fileURLWithPath: "/Applications/Codex Meter.app")))
+        XCTAssertTrue(LoginItemService.isRunningFromInstalledApp(bundleURL: URL(fileURLWithPath: "/Applications/Codex Meter.app/")))
+        XCTAssertFalse(LoginItemService.isRunningFromInstalledApp(
+            bundleURL: URL(fileURLWithPath: "/Users/me/Desktop/private/CodexMeter/dist/Codex Meter.app")
+        ))
+    }
+
+    func testSingleInstanceIgnoresTheCurrentProcess() {
+        XCTAssertTrue(SingleInstance.existingInstances(identifier: "com.example.MissingApp", currentPID: 1).isEmpty)
+    }
+
     func testRemainingPercentIsClamped() {
         XCTAssertEqual(RateLimitWindow(usedPercent: -8, windowDurationMins: nil, resetsAt: nil).remainingPercent, 100)
         XCTAssertEqual(RateLimitWindow(usedPercent: 130, windowDurationMins: nil, resetsAt: nil).remainingPercent, 0)

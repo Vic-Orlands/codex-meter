@@ -7,8 +7,12 @@ struct CodexMeterApp: App {
     @AppStorage("showDockIcon") private var showDockIcon = false
 
     init() {
+        if !SingleInstance.claim() {
+            exit(0)
+        }
         NSApplication.shared.applicationIconImage = AppIconRenderer.make()
         NSApplication.shared.setActivationPolicy(UserDefaults.standard.bool(forKey: "showDockIcon") ? .regular : .accessory)
+        LoginItemService.applyPreference()
     }
 
     var body: some Scene {
